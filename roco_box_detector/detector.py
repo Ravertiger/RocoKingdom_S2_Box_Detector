@@ -64,9 +64,14 @@ def match_templates_multiscale(
     use_grayscale: bool = True,
     use_canny: bool = False,
     label: str = "unknown",
+    coarse_threshold: Optional[float] = None,
 ) -> MatchResult:
     """
     Multi-template, multi-scale template matching.
+
+    If coarse_threshold is set (>0), a single middle-scale pass runs first.
+    When no template reaches coarse_threshold at that scale, the function
+    returns early without the full multi-scale search — ~90% faster on empty frames.
 
     Important:
     - Always records the real global best score.
@@ -79,70 +84,102 @@ def match_templates_multiscale(
     best_scale = 1.0
 
     if image is None or image.size == 0:
-        return MatchResult(
-            stage=label,
-            label=label,
-            matched=False,
-            score=0.0,
-            box=None,
-            template_path=None,
-            scale=None,
-        )
+        return MatchResult(stage=label, label=label, matched=False,
+                           score=0.0, box=None, template_path=None, scale=None)
 
     if not template_items:
-        return MatchResult(
-            stage=label,
-            label=label,
-            matched=False,
-            score=0.0,
-            box=None,
-            template_path=None,
-            scale=None,
-        )
+        return MatchResult(stage=label, label=label, matched=False,
+                           score=0.0, box=None, template_path=None, scale=None)
 
     img_h, img_w = image.shape[:2]
 
-    for tmpl in template_items:
-        tmpl_img = _select_template_variant(tmpl, use_grayscale, use_canny)
-        if tmpl_img is None or tmpl_img.size == 0:
-            continue
-
-        for scale in np.linspace(scale_min, scale_max, scale_steps):
-            scaled = safe_resize_template(tmpl_img, scale)
+    # ── Phase 1: coarse single-scale check ──
+    if coarse_threshold is not None and coarse_threshold > 0 and scale_steps > 1:
+        mid_scale = (scale_min + scale_max) / 2.0
+        best_coarse = -1.0
+        for tmpl in template_items:
+            tmpl_img = _select_template_variant(tmpl, use_grayscale, use_canny)
+            if tmpl_img is None or tmpl_img.size == 0:
+                continue
+            scaled = safe_resize_template(tmpl_img, mid_scale)
             if scaled is None or scaled.size == 0:
                 continue
-
             th, tw = scaled.shape[:2]
             if th > img_h or tw > img_w:
                 continue
-
             try:
-                if tmpl.mask is not None:
-                    scaled_mask = safe_resize_mask(tmpl.mask, scale)
-                    result = cv2.matchTemplate(
-                        image, scaled, cv2.TM_CCOEFF_NORMED, mask=scaled_mask)
-                else:
-                    result = cv2.matchTemplate(
-                        image, scaled, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                result = cv2.matchTemplate(image, scaled, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val > best_coarse:
+                    best_coarse = max_val
             except cv2.error:
                 continue
+        if best_coarse < coarse_threshold:
+            return MatchResult(stage=label, label=label, matched=False,
+                               score=float(best_coarse), box=None,
+                               template_path=None, scale=None)
 
-            if max_val > best_score:
-                best_score = max_val
-                best_box = (max_loc[0], max_loc[1], tw, th)
-                best_tmpl_path = tmpl.path
-                best_scale = scale
+    # ── Phase 2: full multi-scale search (prefer cached variants) ──
+
+    cached = any(tmpl.scaled_variants for tmpl in template_items)
+
+    if cached:
+        for tmpl in template_items:
+            for sv in tmpl.scaled_variants:
+                if sv.width > img_w or sv.height > img_h:
+                    continue
+                try:
+                    if sv.scaled_mask is not None:
+                        result = cv2.matchTemplate(
+                            image, sv.scaled_gray, cv2.TM_CCOEFF_NORMED,
+                            mask=sv.scaled_mask)
+                    else:
+                        result = cv2.matchTemplate(
+                            image, sv.scaled_gray, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                except cv2.error:
+                    continue
+                if max_val > best_score:
+                    best_score = max_val
+                    best_box = (max_loc[0], max_loc[1], sv.width, sv.height)
+                    best_tmpl_path = tmpl.path
+                    best_scale = sv.scale
+    else:
+        # Fallback: runtime resize (should not normally be reached)
+        for tmpl in template_items:
+            tmpl_img = _select_template_variant(tmpl, use_grayscale, use_canny)
+            if tmpl_img is None or tmpl_img.size == 0:
+                continue
+            for scale in np.linspace(scale_min, scale_max, scale_steps):
+                scaled = safe_resize_template(tmpl_img, scale)
+                if scaled is None or scaled.size == 0:
+                    continue
+                th, tw = scaled.shape[:2]
+                if th > img_h or tw > img_w:
+                    continue
+                try:
+                    if tmpl.mask is not None:
+                        scaled_mask = safe_resize_mask(tmpl.mask, scale)
+                        result = cv2.matchTemplate(
+                            image, scaled, cv2.TM_CCOEFF_NORMED, mask=scaled_mask)
+                    else:
+                        result = cv2.matchTemplate(
+                            image, scaled, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                except cv2.error:
+                    continue
+                if max_val > best_score:
+                    best_score = max_val
+                    best_box = (max_loc[0], max_loc[1], tw, th)
+                    best_tmpl_path = tmpl.path
+                    best_scale = scale
 
     matched = best_score >= threshold and best_box is not None
 
     return MatchResult(
-        stage=label,
-        label=label,
-        matched=matched,
+        stage=label, label=label, matched=matched,
         score=float(best_score if best_score >= 0 else 0.0),
-        box=best_box,
-        template_path=best_tmpl_path,
+        box=best_box, template_path=best_tmpl_path,
         scale=float(best_scale) if best_box is not None else None,
     )
 
@@ -185,6 +222,8 @@ class CascadeDetector(threading.Thread):
 
         self._fps = 10
         self._norm_width = 800
+        self._pat_norm_width = 0
+        self._anchor_skip = 0
         self._log_every = 10
         self._show_preview = False
         self._debug_overlay_enabled = False  # transparent box overlay
@@ -262,6 +301,8 @@ class CascadeDetector(threading.Thread):
         rt = config.get("runtime", {})
         self._fps = max(1, int(rt.get("capture_fps", 10)))
         self._norm_width = int(rt.get("normalize_roi_width", 800))
+        self._pat_norm_width = int(rt.get("pattern_normalize_width", 0))
+        self._anchor_skip = max(0, int(rt.get("anchor_skip_frames", 0)))
         self._log_every = max(1, int(rt.get("log_every_n_frames", 10)))
         self._logger.every_n = self._log_every
 
@@ -318,7 +359,13 @@ class CascadeDetector(threading.Thread):
 
     def set_roi(self, roi: Dict[str, int]) -> None:
         self.roi = roi
+        self.cache.rescale_anchor(roi["width"], self._norm_width)
         self._pause_event.set()
+
+    def refresh_anchor_scale(self) -> None:
+        """Re-pre-scale anchor after config reload (called by main.py)."""
+        if self.roi is not None:
+            self.cache.rescale_anchor(self.roi["width"], self._norm_width)
 
     def set_sequence_enabled(self, enabled: bool = True) -> None:
         self._sequence_enabled = True  # always SEQ
@@ -392,6 +439,10 @@ class CascadeDetector(threading.Thread):
                 return None
             self._sampling_state = "idle"
 
+        # ── frame skip: skip anchor matching every N frames ──
+        if self._anchor_skip > 0 and self._frame_idx % (self._anchor_skip + 1) != 0:
+            return None
+
         # ── normal path: full ROI capture + anchor matching ──
         capture = self._capture_roi()
         if capture is None:
@@ -436,6 +487,7 @@ class CascadeDetector(threading.Thread):
         )
 
         t_anchor = time.time()
+        coarse_th = self.config["anchor"].get("coarse_threshold", 0)
         anchor_result = match_templates_multiscale(
             anchor_image,
             anchor_group.items,
@@ -446,6 +498,7 @@ class CascadeDetector(threading.Thread):
             anchor_group.use_grayscale,
             anchor_group.use_canny,
             label="anchor",
+            coarse_threshold=coarse_th if coarse_th > 0 else None,
         )
         t_anchor = time.time() - t_anchor
 
@@ -751,7 +804,8 @@ class CascadeDetector(threading.Thread):
                     t = time.time()
                     fr = match_single_frame_to_patterns(
                         sf.sub_roi_image, sf.sub_roi_box, sf.index,
-                        self.cache.get_pattern_groups(), roi_name="roi1")
+                        self.cache.get_pattern_groups(), roi_name="roi1",
+                        norm_width=self._pat_norm_width)
                     fr1_list.append(fr)
                     print(f"[Finalize] roi1 frame {sf.index} label={fr.label} "
                           f"score={fr.score:.2f} took={time.time()-t:.3f}s")
@@ -774,7 +828,8 @@ class CascadeDetector(threading.Thread):
                         t = time.time()
                         fr = match_single_frame_to_patterns(
                             sf.sub_roi_image_2, sf.sub_roi_box_2, sf.index,
-                            self.cache.get_pattern_groups_2(), roi_name="roi2")
+                            self.cache.get_pattern_groups_2(), roi_name="roi2",
+                            norm_width=self._pat_norm_width)
                         fr2_list.append(fr)
                         print(f"[Finalize] roi2 frame {sf.index} label={fr.label} "
                               f"score={fr.score:.2f} took={time.time()-t:.3f}s")
@@ -1019,7 +1074,9 @@ class CascadeDetector(threading.Thread):
                             (px, max(0, py - 5)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-            cv2.imwrite(path, roi_debug)
+            # cv2.imwrite fails on Chinese paths — use imencode + tofile
+            _, buf = cv2.imencode('.png', roi_debug)
+            buf.tofile(path)
             print(f"[Debug] saved selected voting frame: {path}")
 
         except Exception as e:

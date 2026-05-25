@@ -178,6 +178,12 @@ class AnchorTab(QWidget):
         self.canny_cb.setChecked(ac["use_canny"])
         form.addRow(self.canny_cb)
 
+        self.coarse_thresh_slider, self.coarse_thresh_spin = _make_slider_spin_double(
+            self, form, "粗筛阈值", 0.00, 0.80, ac.get("coarse_threshold", 0.36), 0.01, 2)
+        hint = QLabel("0=关闭粗筛。粗筛用单档scale快速过滤空帧，设太高会漏掉真盒子。")
+        hint.setStyleSheet("color: #888; font-size: 10px;")
+        form.addRow(hint)
+
         _add_separator(form)
 
         # Template list
@@ -223,6 +229,7 @@ class AnchorTab(QWidget):
         ac["scale_steps"] = self.scale_steps_spin.value()
         ac["use_grayscale"] = self.gray_cb.isChecked()
         ac["use_canny"] = self.canny_cb.isChecked()
+        ac["coarse_threshold"] = self.coarse_thresh_spin.value()
         ac["templates"] = [
             self.tmpl_list.item(i).text()
             for i in range(self.tmpl_list.count())
@@ -746,6 +753,8 @@ class Patterns2Tab(QWidget):
 
 
 class RuntimeTab(QWidget):
+    resolution_changed = pyqtSignal()
+
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
         self.config = config
@@ -754,6 +763,13 @@ class RuntimeTab(QWidget):
     def _build(self):
         layout = QVBoxLayout(self)
         form = QFormLayout()
+
+        self.res_combo = QComboBox()
+        self.res_combo.addItems(["720p", "1080p", "2K", "4K"])
+        cur = self.config.get("game_resolution", "2K")
+        self.res_combo.setCurrentText(cur)
+        self.res_combo.currentTextChanged.connect(self._apply_resolution_preset)
+        form.addRow("游戏分辨率预设", self.res_combo)
 
         rt = self.config["runtime"]
         self.fps_spin = QSpinBox()
@@ -769,6 +785,13 @@ class RuntimeTab(QWidget):
         self.norm_spin.setSuffix(" px" if rt["normalize_roi_width"] > 0 else "")
         form.addRow("ROI归一化宽度", self.norm_spin)
 
+        self.skip_spin = QSpinBox()
+        self.skip_spin.setRange(0, 10)
+        self.skip_spin.setValue(rt.get("anchor_skip_frames", 0))
+        self.skip_spin.setSpecialValueText("关闭")
+        self.skip_spin.setSuffix(" 帧跳1" if rt.get("anchor_skip_frames", 0) > 0 else "")
+        form.addRow("Anchor跳帧间隔", self.skip_spin)
+
         self.log_spin = QSpinBox()
         self.log_spin.setRange(1, 1000)
         self.log_spin.setValue(rt["log_every_n_frames"])
@@ -783,10 +806,30 @@ class RuntimeTab(QWidget):
         layout.addLayout(form)
         layout.addStretch()
 
+    def _apply_resolution_preset(self, res: str):
+        self.config["game_resolution"] = res
+        presets = {
+            "720p":  {"anchor": (0.40, 0.65, 5), "pattern": (0.35, 0.75, 6)},
+            "1080p": {"anchor": (0.60, 0.90, 6), "pattern": (0.50, 1.05, 7)},
+            "2K":    {"anchor": (0.75, 1.25, 6), "pattern": (0.65, 1.35, 8)},
+            "4K":    {"anchor": (1.20, 1.80, 6), "pattern": (1.00, 1.70, 8)},
+        }
+        p = presets.get(res, presets["2K"])
+        # Update anchor
+        ac = self.config.setdefault("anchor", {})
+        ac["scale_min"], ac["scale_max"], ac["scale_steps"] = p["anchor"]
+        # Update all pattern groups
+        for pk in ("patterns", "patterns_2"):
+            for _, pcfg in self.config.get(pk, {}).items():
+                pcfg["scale_min"], pcfg["scale_max"], pcfg["scale_steps"] = p["pattern"]
+        self.resolution_changed.emit()
+
     def collect(self, cfg: dict):
+        cfg["game_resolution"] = self.res_combo.currentText()
         rt = cfg["runtime"]
         rt["capture_fps"] = self.fps_spin.value()
         rt["normalize_roi_width"] = self.norm_spin.value()
+        rt["anchor_skip_frames"] = self.skip_spin.value()
         rt["log_every_n_frames"] = self.log_spin.value()
         rt["hide_after_frames"] = self.hide_spin.value()
 
@@ -1140,6 +1183,7 @@ class SettingsWindow(QWidget):
         self.patterns_tab = PatternsTab(self._working_config)
         self.patterns2_tab = Patterns2Tab(self._working_config)
         self.runtime_tab = RuntimeTab(self._working_config)
+        self.runtime_tab.resolution_changed.connect(self._on_resolution_changed)
         self.debug_tab = DebugTab(self._working_config)
         self.overlay_tab = OverlayTab(self._working_config)
 
@@ -1178,9 +1222,18 @@ class SettingsWindow(QWidget):
 
         main_layout.addLayout(btn_row)
 
+    def _on_resolution_changed(self):
+        """Propagate resolution preset values to the UI widgets."""
+        ac = self._working_config.get("anchor", {})
+        self.anchor_tab.scale_min_spin.setValue(ac.get("scale_min", 0.75))
+        self.anchor_tab.scale_max_spin.setValue(ac.get("scale_max", 1.25))
+        self.anchor_tab.scale_steps_spin.setValue(ac.get("scale_steps", 6))
+        # Refresh patterns tabs to show new scale values
+        self.patterns_tab._refresh_combo()
+        self.patterns2_tab._refresh_combo()
+
     def _load_all(self):
         """Refresh all tabs from the working config (e.g. after external change)."""
-        # Just rebuild the working config reference
         self._working_config = copy.deepcopy(self._original_config)
         self.anchor_tab.config = self._working_config
         self.subroi_tab.config = self._working_config

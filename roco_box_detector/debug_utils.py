@@ -100,7 +100,8 @@ class DebugDrawer:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"debug_{ts}{'_' + tag if tag else ''}.png"
         path = os.path.join(self.output_dir, name)
-        cv2.imwrite(path, frame)
+        _, buf = cv2.imencode('.png', frame)
+        buf.tofile(path)
 
 
 class ThrottledLogger:

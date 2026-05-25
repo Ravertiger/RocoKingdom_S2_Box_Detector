@@ -7,7 +7,8 @@ import time
 import cv2
 import numpy as np
 
-from image_utils import preprocess_image, safe_resize_template, safe_resize_mask
+from image_utils import (preprocess_image, resize_by_width,
+                         safe_resize_template, safe_resize_mask)
 from template_cache import TemplateCache, TemplateGroup, TemplateItem
 
 
@@ -181,11 +182,12 @@ def match_single_frame_to_patterns(
     frame_index: int,
     pattern_groups: Dict[str, TemplateGroup],
     roi_name: str = "roi1",
+    norm_width: int = 0,
 ) -> FrameMatchResult:
     """
     Match a single sub_roi frame against all pattern groups.
-    Returns the best FrameMatchResult for this frame.
-    If pattern_groups is empty, returns an unmatched result immediately.
+    If norm_width > 0, the sub_roi is normalized to that width first,
+    and box coordinates are scaled back to original sub_roi space.
     """
     best_result = FrameMatchResult(
         frame_index=frame_index,
@@ -201,6 +203,12 @@ def match_single_frame_to_patterns(
     if sub_roi_image is None or sub_roi_image.size == 0:
         return best_result
     sx, sy, sw, sh = sub_roi_box
+
+    # Normalize for resolution-independent matching
+    pat_scale = 1.0
+    if norm_width > 0 and sub_roi_image.shape[1] > 0:
+        pat_scale = norm_width / sub_roi_image.shape[1]
+        sub_roi_image = resize_by_width(sub_roi_image, norm_width)
 
     for pname, pgroup in pattern_groups.items():
         if not pgroup.items:
@@ -252,6 +260,10 @@ def match_single_frame_to_patterns(
         if best_box is not None:
             matched = best_score >= pgroup.threshold
             lx, ly, lw, lh = best_box
+            if pat_scale != 1.0:
+                inv = 1.0 / pat_scale
+                lx, ly, lw, lh = (int(lx * inv), int(ly * inv),
+                                   int(lw * inv), int(lh * inv))
             result = FrameMatchResult(
                 frame_index=frame_index,
                 label=pname,
