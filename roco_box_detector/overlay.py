@@ -392,7 +392,7 @@ def parse_combined_label(label: str):
 
 class _ChipLabel(QLabel):
     """Rounded chip for bloodline/attribute display."""
-    def __init__(self, text: str, bg_color: QColor, parent=None):
+    def __init__(self, text: str, bg_color: QColor, font_size: int = 14, parent=None):
         super().__init__(text, parent)
         r, g, b, a = bg_color.red(), bg_color.green(), bg_color.blue(), bg_color.alpha()
         self.setStyleSheet(
@@ -401,7 +401,7 @@ class _ChipLabel(QLabel):
             f"  color: #111;"
             f"  border-radius: 4px;"
             f"  padding: 2px 8px;"
-            f"  font-size: 14px;"
+            f"  font-size: {font_size}px;"
             f"  font-weight: bold;"
             f"}}"
         )
@@ -412,6 +412,7 @@ class _HistoryItem(QWidget):
 
     def __init__(self, bloodline: str, attribute: str,
                  bl_color: QColor, attr_color: QColor, plus_color: str,
+                 chip_font_size: int = 14, plus_font_size: int = 14,
                  parent=None):
         super().__init__(parent)
         self.setObjectName("RTO_history_item")
@@ -423,21 +424,21 @@ class _HistoryItem(QWidget):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
 
-        bl_chip = _ChipLabel(bloodline, bl_color)
+        bl_chip = _ChipLabel(bloodline, bl_color, font_size=chip_font_size)
         layout.addWidget(bl_chip)
 
         plus = QLabel("+")
         plus.setStyleSheet(
-            f"color: {plus_color}; font-size: 14px; background: transparent;")
+            f"color: {plus_color}; font-size: {plus_font_size}px; background: transparent;")
         layout.addWidget(plus)
 
         if attribute:
-            attr_chip = _ChipLabel(attribute, attr_color)
+            attr_chip = _ChipLabel(attribute, attr_color, font_size=chip_font_size)
             layout.addWidget(attr_chip)
         else:
             unknown = QLabel("?")
             unknown.setStyleSheet(
-                "color: #666; font-size: 14px; background: transparent;")
+                f"color: #666; font-size: {chip_font_size}px; background: transparent;")
             layout.addWidget(unknown)
 
         layout.addStretch()
@@ -496,6 +497,11 @@ class ResultTextOverlay(QWidget):
         # Config
         self._enabled = cfg.get("enabled", True)
         self._font_family = cfg.get("font_family", "Microsoft YaHei")
+        self._header_font_size = cfg.get("header_font_size", 12)
+        self._status_font_size = cfg.get("status_font_size", 11)
+        self._chip_font_size = cfg.get("chip_font_size", 14)
+        self._counter_font_size = cfg.get("counter_font_size", 11)
+        self._counter_title_font_size = cfg.get("counter_title_font_size", 10)
         self._default_color = QColor(cfg.get("default_color", "#FFD700"))
         self._label_colors: dict = cfg.get("label_colors", {})
         self._bloodline_colors: dict = cfg.get("bloodline_colors", {})
@@ -589,12 +595,14 @@ class ResultTextOverlay(QWidget):
 
         self._title_lbl = QLabel(self._title_text)
         self._title_lbl.setStyleSheet(
-            "color: #ccc; font-size: 12px; background: transparent; font-weight: bold;")
+            f"color: #ccc; font-size: {self._header_font_size}px; "
+            "background: transparent; font-weight: bold;")
         hl.addWidget(self._title_lbl)
 
         self._status_lbl = QLabel("● 运行中")
         self._status_lbl.setStyleSheet(
-            "color: #aaa; font-size: 11px; background: transparent;")
+            f"color: #aaa; font-size: {self._status_font_size}px; "
+            "background: transparent;")
         hl.addWidget(self._status_lbl)
 
         hl.addStretch()
@@ -666,7 +674,7 @@ class ResultTextOverlay(QWidget):
         self._bl_counter = QLabel("")
         self._bl_counter.setObjectName("RTO_bl_counter")
         self._bl_counter.setStyleSheet(
-            "color: #aaa; font-size: 11px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
         self._bl_counter.setWordWrap(True)
         self._bl_counter.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         counter_layout.addWidget(self._bl_counter, 1)
@@ -674,7 +682,7 @@ class ResultTextOverlay(QWidget):
         self._attr_counter = QLabel("")
         self._attr_counter.setObjectName("RTO_attr_counter")
         self._attr_counter.setStyleSheet(
-            "color: #aaa; font-size: 11px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
         self._attr_counter.setWordWrap(True)
         self._attr_counter.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         counter_layout.addWidget(self._attr_counter, 1)
@@ -850,17 +858,17 @@ class ResultTextOverlay(QWidget):
     def show_sampling(self):
         self.set_status_text("正在采样识别...")
         self._status_lbl.setStyleSheet(
-            "color: #66aaff; font-size: 11px; background: transparent;")
+            f"color: #66aaff; font-size: {self._status_font_size}px; background: transparent;")
 
     def show_match(self, text: str):
         self.set_status_text(f"识别到：{text}")
         self._status_lbl.setStyleSheet(
-            "color: #00954f; font-size: 11px; background: transparent;")
+            f"color: #00954f; font-size: {self._status_font_size}px; background: transparent;")
 
     def show_no_match(self):
         self.set_status_text("未识别到目标")
         self._status_lbl.setStyleSheet(
-            "color: #aaa; font-size: 11px; background: transparent;")
+            f"color: #aaa; font-size: {self._status_font_size}px; background: transparent;")
 
     # ── slots ─────────────────────────────────────────────────────────
 
@@ -881,7 +889,8 @@ class ResultTextOverlay(QWidget):
         bl_color = self._resolve_color(bloodline, is_bloodline=True)
         attr_color = self._resolve_color(attribute, is_bloodline=False) if attribute else self._default_color
 
-        item = _HistoryItem(bloodline, attribute, bl_color, attr_color, self._plus_color)
+        item = _HistoryItem(bloodline, attribute, bl_color, attr_color,
+                           self._plus_color, self._chip_font_size, self._chip_font_size)
         self._history_items.append(item)
         self._content_layout.insertWidget(
             self._content_layout.count() - 1, item)
@@ -917,7 +926,7 @@ class ResultTextOverlay(QWidget):
         bl_sorted = sorted(
             self._bloodline_counts.items(), key=lambda x: -x[1])[:top_n]
         if bl_sorted:
-            bl_rows = ["<span style='color:#aaa;font-size:10px;'>血脉统计</span>"]
+            bl_rows = [f"<span style='color:#aaa;font-size:{self._counter_title_font_size}px;'>血脉统计</span>"]
             for name, cnt in bl_sorted:
                 c = self._resolve_color(name, is_bloodline=True)
                 bl_rows.append(
@@ -933,7 +942,7 @@ class ResultTextOverlay(QWidget):
         attr_sorted = sorted(
             self._attribute_counts.items(), key=lambda x: -x[1])[:top_n]
         if attr_sorted:
-            attr_rows = ["<span style='color:#aaa;font-size:10px;'>属性统计</span>"]
+            attr_rows = [f"<span style='color:#aaa;font-size:{self._counter_title_font_size}px;'>属性统计</span>"]
             for name, cnt in attr_sorted:
                 c = self._resolve_color(name, is_bloodline=False)
                 attr_rows.append(
@@ -1026,6 +1035,11 @@ class ResultTextOverlay(QWidget):
         cfg = config.get("result_text_overlay", {})
         self._enabled = cfg.get("enabled", self._enabled)
         self._font_family = cfg.get("font_family", self._font_family)
+        self._header_font_size = cfg.get("header_font_size", self._header_font_size)
+        self._status_font_size = cfg.get("status_font_size", self._status_font_size)
+        self._chip_font_size = cfg.get("chip_font_size", self._chip_font_size)
+        self._counter_font_size = cfg.get("counter_font_size", self._counter_font_size)
+        self._counter_title_font_size = cfg.get("counter_title_font_size", self._counter_title_font_size)
         self._default_color = QColor(cfg.get("default_color", self._default_color.name()))
         self._label_colors = cfg.get("label_colors", self._label_colors)
         self._bloodline_colors = cfg.get("bloodline_colors", self._bloodline_colors)
@@ -1053,6 +1067,16 @@ class ResultTextOverlay(QWidget):
         self.resize(w, h)
         self.setMinimumSize(self._min_w, self._min_h)
         self._title_lbl.setText(self._title_text)
+        self._title_lbl.setStyleSheet(
+            f"color: #ccc; font-size: {self._header_font_size}px; "
+            "background: transparent; font-weight: bold;")
+        self._status_lbl.setStyleSheet(
+            f"color: #aaa; font-size: {self._status_font_size}px; "
+            "background: transparent;")
+        self._bl_counter.setStyleSheet(
+            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
+        self._attr_counter.setStyleSheet(
+            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
         self._panel.setStyleSheet(self._panel_style())
         self._scroll.setStyleSheet(self._scroll_style())
         self._header_bar.setStyleSheet(self._header_style())
@@ -1068,7 +1092,9 @@ class ResultTextOverlay(QWidget):
             bloodline, attribute = parse_combined_label(rec_label)
             bl_color = self._resolve_color(bloodline, is_bloodline=True)
             attr_color = self._resolve_color(attribute, is_bloodline=False) if attribute else self._default_color
-            new_item = _HistoryItem(bloodline, attribute, bl_color, attr_color, self._plus_color)
+            new_item = _HistoryItem(bloodline, attribute, bl_color, attr_color,
+                                   self._plus_color, self._chip_font_size,
+                                   self._chip_font_size)
             self._history_items.append(new_item)
             self._content_layout.insertWidget(
                 self._content_layout.count() - 1, new_item)
