@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from image_utils import (
@@ -128,6 +129,7 @@ class TemplateCache:
                 pcfg["use_grayscale"], pcfg["use_canny"],
                 with_mask=True, pre_scale=True,
             )
+            self._add_width_only_scales(group.items)
             self.pattern_groups[name] = group
 
         for name, pcfg in config.get("patterns_2", {}).items():
@@ -137,6 +139,7 @@ class TemplateCache:
                 pcfg["use_grayscale"], pcfg["use_canny"],
                 with_mask=True, pre_scale=True,
             )
+            self._add_width_only_scales(group.items)
             self.pattern_groups_2[name] = group
 
     def _load_group(
@@ -184,3 +187,38 @@ class TemplateCache:
                 item.scaled_variants.append(ScaledVariant(
                     scale=float(s), scaled_gray=sg, scaled_mask=sm,
                     width=sg.shape[1], height=sg.shape[0]))
+
+    def _add_width_only_scales(self, items: List[TemplateItem]) -> None:
+        """Generate width-only scaled variants for the widest N templates,
+        to handle perspective distortion where the icon appears narrower."""
+        cfg = self._config.get("pattern_width_scale", {})
+        if not cfg.get("enabled", False) or not items:
+            return
+        top_n = cfg.get("top_n", 3)
+        sc_min = cfg.get("scale_min", 0.5)
+        sc_max = cfg.get("scale_max", 1.0)
+        sc_steps = cfg.get("scale_steps", 5)
+
+        # Sort by original width, take top N widest
+        sorted_items = sorted(items, key=lambda it: it.image_gray.shape[1], reverse=True)
+        widest = sorted_items[:top_n]
+
+        extra = 0
+        for s in np.linspace(sc_min, sc_max, sc_steps):
+            for item in widest:
+                new_w = max(4, int(item.image_gray.shape[1] * s))
+                new_h = item.image_gray.shape[0]
+                sg = cv2.resize(item.image_gray, (new_w, new_h),
+                                interpolation=cv2.INTER_LINEAR)
+                if sg.size == 0:
+                    continue
+                sm = None
+                if item.mask is not None:
+                    sm = cv2.resize(item.mask, (new_w, new_h),
+                                    interpolation=cv2.INTER_LINEAR)
+                item.scaled_variants.append(ScaledVariant(
+                    scale=float(s), scaled_gray=sg, scaled_mask=sm,
+                    width=new_w, height=new_h))
+                extra += 1
+        if extra:
+            print(f"[Cache] Width-only variants: {extra} (from top {len(widest)} widest)")

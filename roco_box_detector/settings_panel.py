@@ -804,6 +804,35 @@ class RuntimeTab(QWidget):
         form.addRow("识别消失延迟", self.hide_spin)
 
         layout.addLayout(form)
+
+        # ── width-only scale group ──
+        ws_cfg = self.config.get("pattern_width_scale", {})
+        ws_group = QGroupBox("宽度缩放匹配 (对抗透视畸变)")
+        ws_layout = QFormLayout(ws_group)
+
+        self.ws_enabled_cb = _make_checkbox_row(ws_layout, "启用", ws_cfg.get("enabled", False))
+        hint = QLabel("对每个图案组中最宽的几个模板，额外生成仅压缩宽度的缩放变体")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 10px;")
+        ws_layout.addRow(hint)
+
+        self.ws_top_n_spin = QSpinBox()
+        self.ws_top_n_spin.setRange(1, 10)
+        self.ws_top_n_spin.setValue(ws_cfg.get("top_n", 3))
+        self.ws_top_n_spin.setSuffix(" 个最宽模板")
+        ws_layout.addRow("覆盖模板数", self.ws_top_n_spin)
+
+        self.ws_scmin_slider, self.ws_scmin_spin = _make_slider_spin_double(
+            self, ws_layout, "最小宽度比", 0.30, 0.95, ws_cfg.get("scale_min", 0.5), 0.05, 2)
+        self.ws_scmax_slider, self.ws_scmax_spin = _make_slider_spin_double(
+            self, ws_layout, "最大宽度比", 0.50, 1.00, ws_cfg.get("scale_max", 1.0), 0.05, 2)
+
+        self.ws_scsteps_spin = QSpinBox()
+        self.ws_scsteps_spin.setRange(2, 20)
+        self.ws_scsteps_spin.setValue(ws_cfg.get("scale_steps", 5))
+        ws_layout.addRow("宽度缩放档数", self.ws_scsteps_spin)
+
+        layout.addWidget(ws_group)
         layout.addStretch()
 
     def _apply_resolution_preset(self, res: str):
@@ -832,6 +861,12 @@ class RuntimeTab(QWidget):
         rt["anchor_skip_frames"] = self.skip_spin.value()
         rt["log_every_n_frames"] = self.log_spin.value()
         rt["hide_after_frames"] = self.hide_spin.value()
+        ws = cfg.setdefault("pattern_width_scale", {})
+        ws["enabled"] = self.ws_enabled_cb.isChecked()
+        ws["top_n"] = self.ws_top_n_spin.value()
+        ws["scale_min"] = self.ws_scmin_spin.value()
+        ws["scale_max"] = self.ws_scmax_spin.value()
+        ws["scale_steps"] = self.ws_scsteps_spin.value()
 
 
 class DebugTab(QWidget):

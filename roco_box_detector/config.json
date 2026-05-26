@@ -213,6 +213,13 @@
     "allow_anchor_lost_frames": 2
   },
   "game_resolution": "2K",
+  "pattern_width_scale": {
+    "enabled": true,
+    "top_n": 3,
+    "scale_min": 0.5,
+    "scale_max": 1.0,
+    "scale_steps": 5
+  },
   "runtime": {
     "capture_fps": 30,
     "hide_after_frames": 10,
@@ -249,8 +256,8 @@
   },
   "result_text_overlay": {
     "enabled": true,
-    "x": 2137,
-    "y": 309,
+    "x": 2133,
+    "y": 923,
     "width": 396,
     "height": 583,
     "min_width": 220,
