@@ -1,6 +1,7 @@
 """PyQt5 frameless overlay windows: status bar and result history panel."""
 
 import cv2
+import time
 import numpy as np
 from typing import Optional
 
@@ -556,6 +557,7 @@ class ResultTextOverlay(QWidget):
         self._dragging = False
         self._drag_start = QPoint()
         self._status_screenshot_on = True  # start in screenshot mode
+        self._last_screenshot_count = 0.0  # cooldown for screenshot counting
 
         self.setCursor(Qt.BlankCursor)
 
@@ -991,16 +993,19 @@ class ResultTextOverlay(QWidget):
         else:
             self._ss_ref2 = None
 
-        # Count in screenshot mode: each valid capture = one box
+        # Count in screenshot mode: each valid capture = one box (10s cooldown)
         if self._status_screenshot_on and self._ss_ref1 is not None:
-            dummy_label = f"screenshot_{len(self._records)}"
-            self._records.append(dummy_label)
-            if len(self._records) > self._max_items:
-                self._records.pop(0)
-            self._refresh_screenshot_counter()
-            self._status_lbl.setText(f"📷 已打 {len(self._records)} 次")
-            self._status_lbl.setStyleSheet(
-                f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
+            now = time.time()
+            if now - self._last_screenshot_count >= 10:
+                self._last_screenshot_count = now
+                dummy_label = f"screenshot_{len(self._records)}"
+                self._records.append(dummy_label)
+                if len(self._records) > self._max_items:
+                    self._records.pop(0)
+                self._refresh_screenshot_counter()
+                self._status_lbl.setText(f"📷 已打 {len(self._records)} 次")
+                self._status_lbl.setStyleSheet(
+                    f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
 
         # Use actual widget size, with fallback for pre-layout startup
         max_w = max(200, self._ss_img1.width() or self.width() * 2 // 3)

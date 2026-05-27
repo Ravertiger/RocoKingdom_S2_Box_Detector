@@ -257,8 +257,8 @@
   },
   "result_text_overlay": {
     "enabled": true,
-    "x": 59,
-    "y": 445,
+    "x": 474,
+    "y": 34,
     "width": 835,
     "height": 261,
     "min_width": 220,
@@ -311,5 +311,6 @@
       "速度": "#FFD700"
     },
     "roi_fallback": "太快了没看清喵"
-  }
+  },
+  "startup_complete": true
 }

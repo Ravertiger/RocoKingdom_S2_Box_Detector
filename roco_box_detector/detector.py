@@ -949,13 +949,6 @@ class CascadeDetector(threading.Thread):
                 cv2.putText(debug_frame, f"{best_fr2.label or ''} {best_fr2.score:.2f}",
                             (px, py - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-        # Select best screenshot: best frame on match, last frame otherwise
-        best_frame_idx = seq_result_1.best_frame_index
-        best_frame = next((f for f in frames if f.index == best_frame_idx), frames[-1] if frames else None)
-        ss_img1 = best_frame.sub_roi_image if best_frame else self._latest_sub_roi1
-        ss_img2 = (best_frame.sub_roi_image_2 if best_frame and best_frame.sub_roi_image_2 is not None
-                   else self._latest_sub_roi2)
-
         return CascadeDetectionResult(
             matched=matched,
             label=combined_label,
@@ -975,8 +968,8 @@ class CascadeDetector(threading.Thread):
             mode="SEQ",
             sequence_result=seq_result_1,
             match_votes=votes_str,
-            sub_roi1_image=ss_img1,
-            sub_roi2_image=ss_img2,
+            sub_roi1_image=self._latest_sub_roi1,
+            sub_roi2_image=self._latest_sub_roi2,
         )
 
     # ── debug logging ────────────────────────────────────────────────

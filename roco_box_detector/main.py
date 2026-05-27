@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Optional, Tuple
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 
 from selector import ROISelector
@@ -14,6 +14,7 @@ from detector import CascadeDetector, CascadeDetectionResult
 from template_cache import TemplateCache
 from debug_utils import DebugDrawer
 from settings_panel import SettingsWindow
+from startup_dialog import StartupDialog
 from image_utils import resolve_path
 
 import keyboard
@@ -109,6 +110,14 @@ class App:
             os.makedirs(dpath, exist_ok=True)
 
     def run(self) -> None:
+        # Startup wizard: resolution + solo/duo selection
+        if not self.config.get("startup_complete"):
+            dlg = StartupDialog(self.config)
+            if dlg.exec_() == QDialog.Accepted:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    self.config = json.load(f)
+                self._apply_settings(self.config)
+
         self._register_hotkeys()
         self._start_roi_selection()
         self.detector.start()
