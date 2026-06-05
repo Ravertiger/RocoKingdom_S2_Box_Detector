@@ -37,7 +37,7 @@ class AppBridge(QObject):
 # ── App ──────────────────────────────────────────────────────────────
 
 class App:
-    """Main application controller."""
+    """Main application controller — screenshot-only mode."""
 
     def __init__(self):
         self.config = self._load_config()
@@ -56,7 +56,7 @@ class App:
             lambda: self.result_text.toggle_mouse_lock())
         self._bridge.request_quit.connect(self._quit)
 
-        # Debug box overlay (transparent boxes painted over game screen)
+        # Debug box overlay
         self.debug_box_overlay = DebugBoxOverlay()
 
         # Debug drawer & template cache
@@ -64,10 +64,18 @@ class App:
         print("[Init] Loading templates...")
         self.cache = TemplateCache(self.config)
         print(f"[Init] Anchor templates: {self.cache.anchor_count}")
-        print(f"[Init] Pattern templates: {self.cache.pattern_count} "
-              f"(across {len(self.cache.pattern_groups)} groups)")
+        if self.config.get("icon_detection", {}).get("enabled"):
+            icon_tmpl = self.cache.get_icon_template()
+            if icon_tmpl:
+                print(f"[Init] Icon template: {icon_tmpl.path} "
+                      f"({icon_tmpl.image_gray.shape[1]}x{icon_tmpl.image_gray.shape[0]})")
+                roi = self.config["icon_detection"].get("icon_roi", {})
+                print(f"[Init] Icon ROI: left={roi.get('left')} top={roi.get('top')} "
+                      f"{roi.get('width')}x{roi.get('height')}")
+            else:
+                print("[Init] Icon template: NOT LOADED — check templates/icon/ directory")
 
-        # Result text overlay (floating recognition history panel)
+        # Result overlay (screenshot preview + counter)
         self.result_text = ResultTextOverlay(self.config)
         self.result_text._signals.position_changed.connect(self._on_result_text_moved)
         self.result_text._signals.size_changed.connect(self._on_result_text_resized)
@@ -79,18 +87,13 @@ class App:
         self.result_text._signals.toggle_debug_overlay.connect(self._on_toggle_debug_overlay)
         self.result_text._signals.request_quit.connect(self._quit)
 
-        # Detector — callback emits signal via bridge (thread-safe)
+        # Detector
         self.detector = CascadeDetector(
             config=self.config,
             cache=self.cache,
             debug_drawer=self.debug_drawer,
             on_result=lambda r: self._bridge.result_ready.emit(r),
         )
-
-        # Wire screenshot mode → detector
-        self.result_text._signals.screenshot_mode_changed.connect(
-            self.detector.set_screenshot_only)
-        self.detector.set_screenshot_only(True)  # default: screenshot mode
 
         # Settings panel
         self.settings_window = SettingsWindow(self.config)
@@ -110,8 +113,7 @@ class App:
     def _ensure_dirs(self) -> None:
         dirs = [
             "templates/box_anchor",
-            "templates/patterns",
-            "templates/patterns_2",
+            "templates/icon",
             self.config.get("debug", {}).get("debug_output_dir", "debug_output"),
         ]
         for d in dirs:
@@ -119,7 +121,6 @@ class App:
             os.makedirs(dpath, exist_ok=True)
 
     def run(self) -> None:
-        # Startup wizard: resolution + solo/duo selection
         dlg = StartupDialog(self.config)
         if dlg.exec_() == QDialog.Accepted:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -139,16 +140,38 @@ class App:
         self._selecting_roi = True
         try:
             selector = ROISelector()
-            roi = selector.select()
+            roi = selector.select(message="框选盒子出现位置")
             if roi is not None:
                 self.roi = roi
                 self.detector.set_roi(roi)
                 print(f"[ROI] Selected: left={roi['left']}, top={roi['top']}, "
                       f"width={roi['width']}, height={roi['height']}")
+
+                # Icon detection mode: prompt for second ROI
+                if self.config.get("icon_detection", {}).get("enabled", False):
+                    print("[ROI] Icon detection enabled — select icon area...")
+                    icon_selector = ROISelector()
+                    icon_roi = icon_selector.select(message='框选右上角"幸运惊喜盒"')
+                    if icon_roi is not None:
+                        self.detector.set_icon_roi(icon_roi)
+                        self.config["icon_detection"]["icon_roi"] = icon_roi
+                        self._save_config()
+                        print(f"[ROI] Icon ROI: left={icon_roi['left']}, "
+                              f"top={icon_roi['top']}, "
+                              f"width={icon_roi['width']}, height={icon_roi['height']}")
+                    else:
+                        print("[ROI] Icon ROI selection cancelled.")
             else:
                 print("[ROI] Selection cancelled.")
         finally:
             self._selecting_roi = False
+
+    def _save_config(self) -> None:
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     # ── result processing (runs on main thread via bridge) ────────────
 
@@ -156,32 +179,22 @@ class App:
         """Called on main thread via AppBridge signal. Safe to touch overlay."""
         status = result.status
 
-        # Always update screenshot preview if captures exist
+        # Update screenshot preview
         self.result_text.update_screenshot_preview(
             result.sub_roi1_image, result.sub_roi2_image)
 
-        print(f"[Callback] status={status} matched={result.matched} "
-              f"label={result.label}"
-              f"{' votes=' + result.match_votes if result.match_votes else ''}")
+        print(f"[Callback] status={status}")
 
         self._update_debug_boxes(result)
 
         if status == "sampling":
             self.result_text.show_sampling()
-        elif status == "matched" and result.label:
-            score = 0
-            votes_text = result.match_votes
-            if result.sequence_result is not None:
-                score = result.sequence_result.final_score
-            elif result.pattern_result is not None:
-                score = result.pattern_result.score
-            self.result_text.show_match(f"{result.label} {score:.2f}"
-                                        + (f" 票数 {votes_text}" if votes_text else ""))
-            self.result_text.add_result(result.label)
         elif status == "no_match":
             self.result_text.show_no_match()
+        elif status in ("icon_waiting", "icon_waiting_gone", "icon_delay"):
+            pass  # icon state updates are handled by detector's debug preview
 
-    # ── hotkeys (emit signals; bridge queues to main thread) ──────────
+    # ── hotkeys ───────────────────────────────────────────────────────
 
     def _register_hotkeys(self) -> None:
         try:
@@ -208,15 +221,11 @@ class App:
             print(f"[WARN] Could not register hotkeys (need admin?): {e}")
 
     # ── settings / toggles ────────────────────────────────────────────
+
     def _on_toggle_debug_save(self, enabled: bool) -> None:
-        """Toggle all debug screenshot saving on/off."""
         self.config.setdefault("debug", {})
         self.config["debug"]["save_debug_frames"] = enabled
-        self.config["debug"]["save_sequence_frames"] = enabled
-        self.config["debug"]["save_selected_frames"] = enabled
-
         self.debug_drawer.debug["save_debug_frames"] = enabled
-        # Persist to file so toggle survives restart
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
@@ -249,7 +258,6 @@ class App:
 
     @staticmethod
     def _to_screen(rx: int, ry: int, box) -> Optional[Tuple]:
-        """Convert ROI-relative box to screen coordinates."""
         if box is None:
             return None
         x, y, w, h = box
@@ -264,7 +272,7 @@ class App:
         rx, ry = self.roi["left"], self.roi["top"]
         boxes = []
 
-        # Anchor box (blue) — use original-ROI coords if available
+        # Anchor box (blue)
         anchor_box = result.anchor_box
         if not anchor_box and result.anchor_result:
             anchor_box = result.anchor_result.box
@@ -280,26 +288,14 @@ class App:
             if b:
                 boxes.append((*b, 0, 255, 255, "ROI1"))
 
-        # Sub-ROI2 box (orange) — if available in result
-        if hasattr(result, 'sub_roi_box_2') and result.sub_roi_box_2:
+        # Sub-ROI2 box (orange)
+        if result.sub_roi_box_2:
             b = self._to_screen(rx, ry, result.sub_roi_box_2)
             if b:
                 boxes.append((*b, 0, 200, 255, "ROI2"))
 
-        # Pattern box — green if matched, red if best-unmatched
-        if result.pattern_result and result.pattern_result.box:
-            b = self._to_screen(rx, ry, result.pattern_result.box)
-            if b:
-                if result.pattern_result.matched:
-                    label = f"{result.pattern_result.label or ''} {result.pattern_result.score:.2f}"
-                    boxes.append((*b, 0, 255, 0, label))
-                else:
-                    boxes.append((*b, 0, 0, 255,
-                                  f"best {result.pattern_result.score:.2f}"))
-
         self.debug_box_overlay.update_boxes(boxes)
 
-        # Auto-hide boxes after 3s of no updates
         if hasattr(self, '_box_clear_timer'):
             self._box_clear_timer.stop()
         else:
@@ -312,7 +308,7 @@ class App:
         if self.settings_window.isVisible():
             self.settings_window.hide()
         else:
-            self.settings_window._load_all()  # refresh from live config
+            self.settings_window._load_all()
             self.settings_window.show()
 
     def _apply_settings(self, new_config: dict) -> None:
@@ -340,6 +336,38 @@ class App:
         self.app.quit()
 
 
+def _set_process_priority():
+    """提升当前进程的CPU调度优先级，避免系统高负载下截屏延迟过大。"""
+    import ctypes
+    from ctypes import wintypes
+
+    HIGH_PRIORITY_CLASS = 0x00000080
+    ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.SetPriorityClass.restype = wintypes.BOOL
+
+        handle = kernel32.GetCurrentProcess()
+
+        if kernel32.SetPriorityClass(handle, HIGH_PRIORITY_CLASS):
+            print("[Priority] 进程优先级: HIGH_PRIORITY_CLASS")
+        elif kernel32.SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS):
+            print("[Priority] 进程优先级: ABOVE_NORMAL_PRIORITY_CLASS (无需管理员)")
+        else:
+            err = kernel32.GetLastError()
+            priority = kernel32.GetPriorityClass(handle)
+            names = {0x40: "IDLE", 0x4000: "BELOW_NORMAL", 0x20: "NORMAL",
+                     0x8000: "ABOVE_NORMAL", 0x80: "HIGH", 0x100: "REALTIME"}
+            name = names.get(priority, f"未知({priority})")
+            print(f"[Priority] 设置失败 (错误码: {err})，当前优先级: {name}")
+    except Exception as e:
+        print(f"[Priority] 设置进程优先级异常: {e}")
+
+
 if __name__ == "__main__":
+    _set_process_priority()
     app = App()
     app.run()

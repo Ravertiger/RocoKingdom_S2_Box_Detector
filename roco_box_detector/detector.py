@@ -1,4 +1,4 @@
-"""Core cascade detection: anchor -> Sub-ROI -> pattern, with optional multi-frame sampling."""
+"""Core detection: anchor matching -> Sub-ROI screenshot capture."""
 
 import os
 import threading
@@ -15,14 +15,7 @@ from image_utils import (preprocess_image, resize_by_width,
 from geometry_utils import SubRoiConfig, compute_sub_roi, scale_box
 from template_cache import TemplateCache, TemplateItem
 from debug_utils import DebugDrawer, ThrottledLogger
-from sequence_analyzer import (
-    SequenceFrame,
-    FrameMatchResult,
-    SequenceDetectionResult,
-    calculate_sharpness,
-    match_single_frame_to_patterns,
-    vote_frame_results,
-)
+from sequence_analyzer import SequenceFrame, calculate_sharpness
 
 
 @dataclass
@@ -41,15 +34,11 @@ class CascadeDetectionResult:
     matched: bool
     label: Optional[str]
     anchor_result: Optional[MatchResult]
-    pattern_result: Optional[MatchResult]
     sub_roi_box: Optional[Tuple[int, int, int, int]]
-    anchor_box: Optional[Tuple[int, int, int, int]] = None  # original-ROI coords
+    anchor_box: Optional[Tuple[int, int, int, int]] = None
     debug_frame: Optional[np.ndarray] = None
     sub_roi_box_2: Optional[Tuple[int, int, int, int]] = None
     status: str = ""
-    mode: str = "SEQ"
-    sequence_result: Optional[SequenceDetectionResult] = None
-    match_votes: str = ""  # only meaningful in SEQ mode
     sub_roi1_image: Optional[np.ndarray] = None  # for screenshot preview
     sub_roi2_image: Optional[np.ndarray] = None
 
@@ -68,18 +57,7 @@ def match_templates_multiscale(
     coarse_threshold: Optional[float] = None,
     early_exit_score: float = 0.0,
 ) -> MatchResult:
-    """
-    Multi-template, multi-scale template matching.
-
-    If coarse_threshold is set (>0), a single middle-scale pass runs first.
-    When no template reaches coarse_threshold at that scale, the function
-    returns early without the full multi-scale search — ~90% faster on empty frames.
-
-    Important:
-    - Always records the real global best score.
-    - matched is decided only at the end by comparing best_score >= threshold.
-    - Even when not matched, best_box / best_score can be used for debug.
-    """
+    """Multi-template, multi-scale template matching for anchor detection."""
     best_score = -1.0
     best_box = None
     best_tmpl_path = None
@@ -122,7 +100,6 @@ def match_templates_multiscale(
                                template_path=None, scale=None)
 
     # ── Phase 2: full multi-scale search (prefer cached variants) ──
-
     cached = any(tmpl.scaled_variants for tmpl in template_items)
 
     if cached:
@@ -153,7 +130,6 @@ def match_templates_multiscale(
                             template_path=best_tmpl_path,
                             scale=float(best_scale))
     else:
-        # Fallback: runtime resize (should not normally be reached)
         for tmpl in template_items:
             tmpl_img = _select_template_variant(tmpl, use_grayscale)
             if tmpl_img is None or tmpl_img.size == 0:
@@ -210,7 +186,10 @@ def _select_template_variant(
 # ── Detector ─────────────────────────────────────────────────────────
 
 class CascadeDetector(threading.Thread):
-    """Background detector thread."""
+    """Background detector thread — screenshot-only mode.
+
+    Flow: anchor detect → lock position → delay → capture sub-ROI → cooldown.
+    """
 
     def __init__(
         self,
@@ -231,40 +210,33 @@ class CascadeDetector(threading.Thread):
         self._pause_event = threading.Event()
         self._pause_event.set()
 
-        self._fps = 10
         self._norm_width = 800
-        self._pat_norm_width = 0
         self._anchor_skip = 0
         self._log_every = 10
         self._show_preview = False
-        self._debug_overlay_enabled = False  # transparent box overlay
-        self._screenshot_only = False
+        self._debug_overlay_enabled = False
         self._latest_sub_roi1: Optional[np.ndarray] = None
         self._latest_sub_roi2: Optional[np.ndarray] = None
         self._preview_window_open = False
-        self._preview_fps_limit = 15   # max preview refresh rate
+        self._preview_fps_limit = 15
         self._last_preview_time = 0.0
-        # Per-frame debug state (updated by detection methods, drawn by unified preview)
+
+        # Per-frame debug state
         self._dbg_roi: Optional[np.ndarray] = None
         self._dbg_anchor_box: Optional[Tuple[int, int, int, int]] = None
         self._dbg_sub_roi_box: Optional[Tuple[int, int, int, int]] = None
         self._dbg_sub_roi_box_2: Optional[Tuple[int, int, int, int]] = None
-        self._dbg_pattern_box: Optional[Tuple[int, int, int, int]] = None
-        self._dbg_pattern_box_2: Optional[Tuple[int, int, int, int]] = None
-        self._dbg_pattern_best_box: Optional[Tuple[int, int, int, int]] = None
-        self._dbg_pattern_best_box_2: Optional[Tuple[int, int, int, int]] = None
         self._dbg_anchor_score: float = 0.0
-        self._dbg_pattern_score: float = 0.0
-        self._dbg_pattern_score_2: float = 0.0
-        self._dbg_pattern_label: Optional[str] = None
-        self._dbg_pattern_label_2: Optional[str] = None
         self._dbg_status_text: str = ""
         self._last_cycle_ms: float = 0.0
+        # Icon debug state
+        self._dbg_icon_thumbnail: Optional[np.ndarray] = None
+        self._dbg_icon_present: bool = False
+        self._dbg_icon_score: float = 0.0
 
         self._logger = ThrottledLogger(every_n=self._log_every)
         self._frame_idx = 0
 
-        # Reusable mss instance, created in run()
         self._sct: Optional[mss.mss] = None
 
         # Sequence state
@@ -273,50 +245,47 @@ class CascadeDetector(threading.Thread):
         self._locked_sub_roi: Optional[Tuple[int, int, int, int]] = None
         self._locked_sub_roi_2: Optional[Tuple[int, int, int, int]] = None
         self._sampling_frames: List[SequenceFrame] = []
-        # Incremental pattern results for SEQ early vote.
-        # Each sampled frame is matched exactly once, then reused by finalize.
-        self._sampling_match_results_1: List[FrameMatchResult] = []
-        self._sampling_match_results_2: List[FrameMatchResult] = []
         self._sampling_seq_idx = 0
         self._sampling_start_time = 0.0
         self._sampling_next_time = 0.0
-        self._anchor_lost_count = 0
         self._cooldown_until = 0.0
         self._seq_triggered = False
 
-        # Sequence config defaults
-        self._sequence_enabled = True
+        # Config
         self._seq_sample_delay = 0.5
-        self._seq_sample_interval = 0.1
-        self._seq_max_frames = 5
-        self._min_frames_for_vote = 3
-        self._seq_selected_count = 5
-        self._seq_min_votes = 2
-        self._seq_min_avg = 0.72
-        self._seq_sim_thresh = 0.88
-        self._seq_resize_w = 96
-        self._seq_use_sharpness = True
-        self._seq_use_similarity = False
-        self._seq_allow_lost = 2
+        self._seq_sample_interval = 0.01
+        self._seq_max_frames = 1
+        self._seq_use_sharpness = False
         self._cooldown_seconds = 1.5
-        self._require_roi2 = False
         self._roi2_enabled = False
 
-        self._seq_output_dir = ""
-        self._seq_selected_dir = ""
+        # Icon detection state
+        self._icon_detection_enabled = False
+        self._icon_roi: Optional[Dict[str, int]] = None
+        self._icon_threshold = 0.75
+        self._icon_disappear_delay = 0.5
+        self._icon_delay_until = 0.0
+        self._icon_use_grayscale = True
+        self._icon_preprocess_mode = "none"
+        self._icon_gamma = 0.75
+        self._icon_consecutive_present = 0
+        self._icon_consecutive_absent = 0
+        self._icon_debounce_frames = 3
+        self._icon_reappear_count = 0
+        self._gate_open_time = 0.0
+        self._capture_offsets = [2.0, 2.5, 3.0]
+        self._capture_offset_idx = 0
+        self._icon_status_text = ""
 
         self._load_all_config(config)
 
     # ── config ───────────────────────────────────────────────────────
 
     def _load_all_config(self, config: dict) -> None:
-        """Shared config loader used by __init__ and update_config."""
         self.config = config
 
         rt = config.get("runtime", {})
-        self._fps = max(1, int(rt.get("capture_fps", 10)))
         self._norm_width = int(rt.get("normalize_roi_width", 800))
-        self._pat_norm_width = int(rt.get("pattern_normalize_width", 0))
         self._anchor_skip = max(0, int(rt.get("anchor_skip_frames", 0)))
         self._log_every = max(1, int(rt.get("log_every_n_frames", 10)))
         self._logger.every_n = self._log_every
@@ -324,84 +293,76 @@ class CascadeDetector(threading.Thread):
         dbg = config.get("debug", {})
         self._show_preview = bool(dbg.get("show_preview_window", False))
 
-        out_dir = resolve_path(dbg.get("debug_output_dir", "debug_output"))
-        self._seq_output_dir = os.path.join(out_dir, "sequence_raw")
-        self._seq_selected_dir = os.path.join(out_dir, "sequence_selected")
-
-        seq = config.get("sequence", {})
-        self._sequence_enabled = True  # always SEQ — ignore config
-        self._seq_sample_delay = float(seq.get("sample_delay_seconds", 0.5))
-        self._seq_sample_interval = float(
-            seq.get("sample_interval_seconds")
-            or (1.0 / max(1, seq.get("sample_fps", 10)))
-        )
-        self._seq_max_frames = max(1, int(seq.get("max_frames", 5)))
-        self._min_frames_for_vote = max(1, int(seq.get("min_frames_for_vote", 3)))
-        self._seq_selected_count = max(1, int(seq.get("selected_frame_count", 5)))
-        self._seq_min_votes = max(1, int(seq.get("min_vote_count", 2)))
-        self._seq_min_avg = float(seq.get("min_average_score", 0.72))
-        self._seq_sim_thresh = float(seq.get("stable_similarity_threshold", 0.88))
-        self._seq_resize_w = max(16, int(seq.get("frame_resize_width", 96)))
-        self._seq_use_sharpness = bool(seq.get("use_sharpness_filter", True))
-        self._seq_use_similarity = bool(seq.get("use_similarity_filter", False))
-        self._seq_allow_lost = max(0, int(seq.get("allow_anchor_lost_frames", 2)))
-
         self._cooldown_seconds = float(rt.get("sequence_cooldown_seconds", 1.5))
 
-        self._require_roi2 = bool(seq.get("require_roi2_for_result", False))
         sr2 = config.get("sub_roi_2", {})
         self._roi2_enabled = bool(sr2.get("enabled", False))
+
+        # 截图参数：延迟、间隔、张数
+        seq = config.get("sequence", {})
+        self._seq_sample_delay = float(seq.get("sample_delay_seconds", 0.5))
+        self._seq_sample_interval = float(
+            seq.get("sample_interval_seconds") or 0.01)
+        self._seq_max_frames = max(1, int(seq.get("max_frames", 1)))
+        self._seq_use_sharpness = bool(seq.get("use_sharpness_filter", False))
+
+        # Icon detection config
+        ic = config.get("icon_detection", {})
+        self._icon_detection_enabled = bool(ic.get("enabled", False))
+        self._icon_threshold = float(ic.get("threshold", 0.75))
+        self._icon_disappear_delay = float(ic.get("disappear_delay_seconds", 0.5))
+        self._icon_debounce_frames = max(1, int(ic.get("debounce_frames", 3)))
+        raw_offsets = ic.get("capture_offsets", [2.0, 2.5, 3.0])
+        self._capture_offsets = sorted(float(x) for x in raw_offsets) if raw_offsets else [2.0]
+        self._icon_use_grayscale = bool(ic.get("use_grayscale", True))
+        self._icon_preprocess_mode = ic.get("preprocess_mode", "none")
+        self._icon_gamma = float(ic.get("gamma", 0.75))
+        if "icon_roi" in ic:
+            ir = ic["icon_roi"]
+            self._icon_roi = {
+                "left": int(ir["left"]), "top": int(ir["top"]),
+                "width": max(1, int(ir["width"])),
+                "height": max(1, int(ir["height"])),
+            }
 
     def update_config(self, config: dict) -> None:
         self._load_all_config(config)
 
-    # ── debug save switches ──────────────────────────────────────────
+    # ── debug save ──────────────────────────────────────────────────
 
     def _debug_save_enabled(self) -> bool:
-        """
-        GUI 截屏总开关。
-
-        只要 GUI 打开 save_debug_frames：
-        - SEQ 会保存最终用于投票的 selected frames。
-        """
         return bool(self.config.get("debug", {}).get("save_debug_frames", False))
-
-    def _save_selected_enabled(self) -> bool:
-        """SEQ selected frames save: follows the global debug screenshot toggle."""
-        return self._debug_save_enabled()
 
     # ── public API ───────────────────────────────────────────────────
 
     def set_roi(self, roi: Dict[str, int]) -> None:
         self.roi = roi
         self.cache.rescale_anchor(roi["width"], self._norm_width)
-        # Reset all sampling state to avoid stale state from previous ROI
-        self._sampling_state = "idle"
+        self._sampling_state = "waiting_icon" if self._icon_detection_enabled else "idle"
+        self._icon_status_text = "waiting for icon..." if self._icon_detection_enabled else ""
         self._seq_triggered = False
         self._cooldown_until = 0
         self._sampling_frames.clear()
-        self._sampling_match_results_1.clear()
-        self._sampling_match_results_2.clear()
         self._locked_anchor_box = None
         self._locked_sub_roi = None
         self._locked_sub_roi_2 = None
         self._sampling_seq_idx = 0
         self._pause_event.set()
 
+    def set_icon_roi(self, roi: Dict[str, int]) -> None:
+        """Set the icon detection ROI (absolute screen coordinates)."""
+        self._icon_roi = {
+            "left": int(roi["left"]), "top": int(roi["top"]),
+            "width": max(1, int(roi["width"])),
+            "height": max(1, int(roi["height"])),
+        }
+
     def refresh_anchor_scale(self) -> None:
-        """Re-pre-scale anchor after config reload (called by main.py)."""
         if self.roi is not None:
             self.cache.rescale_anchor(self.roi["width"], self._norm_width)
 
-    def set_sequence_enabled(self, enabled: bool = True) -> None:
-        self._sequence_enabled = True  # always SEQ
-
     def set_preview_enabled(self, enabled: bool) -> None:
         self._show_preview = enabled
-
-    def set_screenshot_only(self, enabled: bool) -> None:
-        """In screenshot-only mode, stop after first sub-ROI capture. No pattern matching."""
-        self._screenshot_only = enabled
 
     def stop(self) -> None:
         self._show_preview = False
@@ -412,8 +373,8 @@ class CascadeDetector(threading.Thread):
 
     def run(self) -> None:
         self._sct = mss.mss()
-        interval = 1.0 / max(1, self._fps)
         _mss_frame = 0
+        _MIN_SLEEP = 0.001
 
         try:
             while not self._stop_event.is_set():
@@ -426,7 +387,6 @@ class CascadeDetector(threading.Thread):
                     time.sleep(0.1)
                     continue
 
-                # Periodic mss recreation to prevent GDI handle leak
                 _mss_frame += 1
                 if _mss_frame % 500 == 0:
                     self._sct.close()
@@ -439,9 +399,10 @@ class CascadeDetector(threading.Thread):
                     self.on_result(result)
 
                 elapsed = time.time() - t0
-                self._last_cycle_ms = elapsed * 1000
-                if elapsed < interval:
-                    time.sleep(interval - elapsed)
+                if elapsed > 0.0005:
+                    self._last_cycle_ms = elapsed * 1000
+                if elapsed < _MIN_SLEEP:
+                    time.sleep(_MIN_SLEEP - elapsed)
 
         finally:
             if self._sct is not None:
@@ -452,15 +413,339 @@ class CascadeDetector(threading.Thread):
             except Exception:
                 pass
 
+    # ── icon detection ───────────────────────────────────────────────
+
+    def _check_icon_present(self) -> bool:
+        """Capture the icon ROI and run single-scale template matching.
+        Stores thumbnail + score for debug preview."""
+        self._dbg_icon_thumbnail = None
+        self._dbg_icon_score = 0.0
+
+        # ── fail-fast checks (log once on first failure) ──
+        if self._icon_roi is None:
+            if self._frame_idx == 1:
+                print("[Icon] ERROR: icon_roi is None — 图标ROI未设置")
+            self._dbg_icon_present = False
+            return False
+        if self._sct is None:
+            self._dbg_icon_present = False
+            return False
+        icon_tmpl = self.cache.get_icon_template()
+        if icon_tmpl is None:
+            if self._frame_idx <= 3:
+                print("[Icon] ERROR: no icon template loaded — "
+                      "请检查 templates/icon/ 目录和 config.json 中 icon_detection.templates")
+            self._dbg_icon_present = False
+            return False
+
+        # ── capture icon ROI ──
+        try:
+            icon_img = self._sct.grab(self._icon_roi)
+            icon_img = np.array(icon_img)[:, :, :3]
+        except Exception as e:
+            if self._frame_idx <= 3:
+                print(f"[Icon] capture failed: {e}")
+            self._dbg_icon_present = False
+            return False
+        if icon_img is None or icon_img.size == 0:
+            self._dbg_icon_present = False
+            return False
+
+        # Store thumbnail for debug preview
+        thumb = cv2.resize(icon_img, (80, 80), interpolation=cv2.INTER_NEAREST)
+        self._dbg_icon_thumbnail = np.ascontiguousarray(thumb)
+
+        icon_gray = preprocess_image(
+            icon_img,
+            use_grayscale=self._icon_use_grayscale,
+            preprocess_mode=self._icon_preprocess_mode,
+            gamma=self._icon_gamma,
+        )
+
+        # ── multi-scale matching (use pre-scaled variants from cache) ──
+        img_h, img_w = icon_gray.shape[:2]
+        best_score = -1.0
+        if icon_tmpl.scaled_variants:
+            for sv in icon_tmpl.scaled_variants:
+                if sv.width > img_w or sv.height > img_h:
+                    continue
+                try:
+                    result = cv2.matchTemplate(
+                        icon_gray, sv.scaled_gray, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    if max_val > best_score:
+                        best_score = max_val
+                except cv2.error:
+                    continue
+        else:
+            # Fallback: single-scale
+            th, tw = icon_tmpl.image_gray.shape[:2]
+            if th <= img_h and tw <= img_w:
+                try:
+                    result = cv2.matchTemplate(
+                        icon_gray, icon_tmpl.image_gray, cv2.TM_CCOEFF_NORMED)
+                    _, best_score, _, _ = cv2.minMaxLoc(result)
+                except cv2.error as e:
+                    if self._frame_idx <= 3:
+                        print(f"[Icon] matchTemplate failed: {e}")
+                    self._dbg_icon_present = False
+                    return False
+
+        self._dbg_icon_score = float(best_score)
+        self._dbg_icon_present = best_score >= self._icon_threshold
+
+        # Periodic score logging (every ~60 frames)
+        if self._frame_idx % 60 == 0:
+            state = "MATCH" if self._dbg_icon_present else "below threshold"
+            print(f"[Icon] score={best_score:.3f} (threshold={self._icon_threshold}) → {state}")
+
+        return self._dbg_icon_present
+
+    def _handle_waiting_icon(self, now: float) -> Optional[CascadeDetectionResult]:
+        """State: icon NOT present. Poll until it appears."""
+        self._refresh_preview_roi()
+        icon_present = self._check_icon_present()
+        if icon_present:
+            self._icon_consecutive_present += 1
+            if self._icon_consecutive_present >= self._icon_debounce_frames:
+                print(f"[IconState] WAIT_ICON → WAIT_GONE (icon detected, "
+                      f"score={self._dbg_icon_score:.3f})")
+                self._sampling_state = "waiting_icon_gone"
+                self._icon_consecutive_present = 0
+                self._icon_consecutive_absent = 0
+                self._icon_status_text = "icon appeared, waiting gone..."
+        else:
+            self._icon_consecutive_present = 0
+        self._dbg_status_text = self._icon_status_text
+        self._show_live_preview()
+        if self._frame_idx % 30 == 0:
+            return CascadeDetectionResult(
+                matched=False, label=None, anchor_result=None,
+                sub_roi_box=None, status="icon_waiting",
+                sub_roi1_image=None, sub_roi2_image=None)
+        return None
+
+    def _handle_waiting_icon_gone(self, now: float) -> Optional[CascadeDetectionResult]:
+        """State: icon IS present. Poll until it disappears."""
+        self._refresh_preview_roi()
+        icon_present = self._check_icon_present()
+        if not icon_present:
+            self._icon_consecutive_absent += 1
+            if self._icon_consecutive_absent >= self._icon_debounce_frames:
+                print(f"[IconState] WAIT_GONE → DELAY (icon disappeared, "
+                      f"delay={self._icon_disappear_delay:.1f}s)")
+                self._sampling_state = "icon_delay"
+                self._icon_delay_until = now + self._icon_disappear_delay
+                self._icon_consecutive_absent = 0
+                self._icon_consecutive_present = 0
+                self._icon_status_text = f"icon gone, capture in {self._icon_disappear_delay:.1f}s..."
+        else:
+            self._icon_consecutive_absent = 0
+        self._dbg_status_text = self._icon_status_text
+        self._show_live_preview()
+        if self._frame_idx % 30 == 0:
+            return CascadeDetectionResult(
+                matched=False, label=None, anchor_result=None,
+                sub_roi_box=None, status="icon_waiting_gone",
+                sub_roi1_image=None, sub_roi2_image=None)
+        return None
+
+    def _handle_icon_delay(self, now: float) -> Optional[CascadeDetectionResult]:
+        """State: icon just disappeared. Wait delay, then open gate for anchor matching.
+        Redundant: if icon reappears (debounced), cancel countdown and go back."""
+        self._refresh_preview_roi()
+        # Redundant check: cancel countdown if icon reappears
+        if self._frame_idx % 5 == 0:
+            icon_back = self._check_icon_present()
+            if icon_back:
+                self._icon_reappear_count += 1
+                if self._icon_reappear_count >= self._icon_debounce_frames:
+                    print(f"[IconState] DELAY → WAIT_GONE (icon reappeared, "
+                          f"countdown cancelled)")
+                    self._sampling_state = "waiting_icon_gone"
+                    self._icon_reappear_count = 0
+                    self._icon_consecutive_present = 0
+                    self._icon_consecutive_absent = 0
+                    self._icon_status_text = "icon reappeared, waiting gone..."
+                    self._dbg_status_text = self._icon_status_text
+                    self._show_live_preview()
+                    return None
+            else:
+                self._icon_reappear_count = 0
+        remaining = self._icon_delay_until - now
+        if remaining <= 0:
+            print(f"[IconState] DELAY → IDLE_SCHEDULED "
+                  f"(gate open, capture at {self._capture_offsets})")
+            self._sampling_state = "idle_scheduled"
+            self._gate_open_time = now
+            self._capture_offset_idx = 0
+            self._icon_status_text = ""
+            self._dbg_status_text = ""
+            return None
+        self._dbg_status_text = f"capture in {remaining:.1f}s"
+        self._show_live_preview()
+        if self._frame_idx % 30 == 0:
+            return CascadeDetectionResult(
+                matched=False, label=None, anchor_result=None,
+                sub_roi_box=None, status="icon_delay",
+                sub_roi1_image=None, sub_roi2_image=None)
+        return None
+
+    def _save_scheduled_frame(self, roi_img, anchor_result, scale_factor,
+                               offset: float) -> None:
+        """Save scheduled capture frame to debug_output for timing review."""
+        try:
+            out_dir = resolve_path(
+                self.config.get("debug", {}).get("debug_output_dir", "debug_output"))
+            os.makedirs(out_dir, exist_ok=True)
+            debug = roi_img.copy()
+            # Draw anchor box if found
+            if anchor_result.matched and anchor_result.box is not None:
+                box = scale_box(anchor_result.box, 1.0 / scale_factor)
+                x, y, w, h = box
+                cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(debug, f"anchor {anchor_result.score:.2f}",
+                            (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 255, 0), 1)
+            # Status bar
+            status = "MATCH" if anchor_result.matched else "NO MATCH"
+            cv2.rectangle(debug, (0, 0), (debug.shape[1], 26), (0, 0, 0), -1)
+            cv2.putText(debug, f"+{offset:.1f}s best={anchor_result.score:.3f} {status}",
+                        (8, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (0, 255, 0) if anchor_result.matched else (0, 0, 255), 1)
+            ts = time.strftime("%H%M%S")
+            name = f"scheduled_{ts}_+{offset:.2f}s_score{anchor_result.score:.3f}.png"
+            path = os.path.join(out_dir, name)
+            _, buf = cv2.imencode('.png', debug)
+            buf.tofile(path)
+            print(f"[Debug] saved scheduled frame: {name}")
+        except Exception as e:
+            print(f"[Debug] failed to save scheduled frame: {e}")
+
+    def _refresh_preview_roi(self) -> None:
+        """Periodically capture game ROI for debug preview.
+        Always captures on first call (when _dbg_roi is None),
+        then throttles to every 15 frames."""
+        if self._dbg_roi is not None and self._frame_idx % 15 != 0:
+            return
+        capture = self._capture_roi()
+        if capture is not None:
+            self._dbg_roi = capture.copy()
+
+    # ── scheduled capture (icon mode gate open) ──────────────────────
+
+    def _handle_idle_scheduled(self, now: float) -> Optional[CascadeDetectionResult]:
+        """Gate open: capture at predefined offsets, run anchor matching on each."""
+        if self._capture_offset_idx >= len(self._capture_offsets):
+            # All offsets exhausted, no anchor found — enter cooldown
+            print(f"[IconState] IDLE_SCHEDULED → COOLDOWN (all offsets exhausted)")
+            self._sampling_state = "cooldown"
+            self._cooldown_until = now + self._cooldown_seconds
+            self._seq_triggered = True
+            self._dbg_status_text = ""
+            return None
+
+        next_offset = self._capture_offsets[self._capture_offset_idx]
+        elapsed = now - self._gate_open_time
+        if elapsed < next_offset:
+            self._dbg_status_text = (f"next anchor match in "
+                                     f"{next_offset - elapsed:.1f}s")
+            self._show_live_preview()
+            return None
+
+        # Time to capture and run anchor matching
+        self._capture_offset_idx += 1
+        print(f"[IconState] scheduled capture at +{next_offset:.1f}s "
+              f"({self._capture_offset_idx}/{len(self._capture_offsets)})")
+
+        capture = self._capture_roi()
+        if capture is None:
+            return None
+        self._dbg_roi = capture
+
+        h, w = capture.shape[:2]
+        scale_factor = 1.0
+        if self._norm_width > 0 and w > 0:
+            scale_factor = self._norm_width / w
+            normalized = resize_by_width(capture, self._norm_width)
+        else:
+            normalized = capture
+
+        anchor_group = self.cache.get_anchor_templates()
+        if anchor_group is None or not anchor_group.items:
+            return None
+
+        anchor_image = preprocess_image(
+            normalized,
+            use_grayscale=anchor_group.use_grayscale,
+            preprocess_mode=anchor_group.preprocess_mode,
+            gamma=anchor_group.gamma,
+        )
+
+        coarse_th = self.config["anchor"].get("coarse_threshold", 0)
+        early_exit = self.config["anchor"].get("early_exit_score", 0.9)
+        anchor_result = match_templates_multiscale(
+            anchor_image, anchor_group.items,
+            anchor_group.threshold,
+            anchor_group.scale_min * scale_factor,
+            anchor_group.scale_max * scale_factor,
+            anchor_group.scale_steps,
+            anchor_group.use_grayscale,
+            label="anchor",
+            coarse_threshold=coarse_th if coarse_th > 0 else None,
+            early_exit_score=early_exit,
+        )
+
+        # ── debug save: scheduled capture frame ──
+        if self._debug_save_enabled():
+            self._save_scheduled_frame(capture, anchor_result, scale_factor,
+                                       next_offset)
+
+        if anchor_result.matched and anchor_result.box is not None:
+            anchor_box = scale_box(anchor_result.box, 1.0 / scale_factor)
+            print(f"[IconState] anchor FOUND at +{next_offset:.1f}s "
+                  f"score={anchor_result.score:.2f}")
+            self._start_sampling(capture, anchor_box, now)
+            self._dbg_anchor_box = anchor_box
+            return CascadeDetectionResult(
+                matched=False, label=None,
+                anchor_result=anchor_result,
+                sub_roi_box=self._locked_sub_roi,
+                anchor_box=anchor_box,
+                sub_roi_box_2=self._locked_sub_roi_2,
+                debug_frame=None,
+                status="sampling",
+                sub_roi1_image=self._latest_sub_roi1,
+                sub_roi2_image=self._latest_sub_roi2,
+            )
+
+        # No match at this offset, try next
+        print(f"[IconState] anchor NOT found at +{next_offset:.1f}s "
+              f"(best={anchor_result.score:.2f})")
+        self._dbg_status_text = (f"anchor miss at +{next_offset:.1f}s "
+                                 f"score={anchor_result.score:.2f}")
+        self._show_live_preview()
+        return None
+
     # ── per-frame logic ──────────────────────────────────────────────
 
     def _detect_one_frame(self) -> Optional[CascadeDetectionResult]:
         self._frame_idx += 1
         now = time.time()
 
-        # ── locked sampling fast path: skip full ROI capture entirely ──
-        if (self._sequence_enabled
-                and self._sampling_state == "sampling"
+        # ── icon detection fast paths (before anchor matching) ──
+        if self._icon_detection_enabled:
+            if self._sampling_state == "waiting_icon":
+                return self._handle_waiting_icon(now)
+            if self._sampling_state == "waiting_icon_gone":
+                return self._handle_waiting_icon_gone(now)
+            if self._sampling_state == "icon_delay":
+                return self._handle_icon_delay(now)
+            if self._sampling_state == "idle_scheduled":
+                return self._handle_idle_scheduled(now)
+
+        # ── locked sampling fast path ──
+        if (self._sampling_state == "sampling"
                 and self._locked_anchor_box is not None
                 and self._locked_sub_roi is not None):
             result = self._handle_locked_sampling(None, now)
@@ -471,36 +756,49 @@ class CascadeDetector(threading.Thread):
                 return result
             return None
 
-        # ── cooldown fast path (SEQ mode): skip anchor matching ──
-        if self._sequence_enabled and self._sampling_state == "cooldown":
+        # ── cooldown fast path ──
+        if self._sampling_state == "cooldown":
             if now < self._cooldown_until:
+                # Icon mode: keep thumbnail live during cooldown
+                if self._icon_detection_enabled and self._frame_idx % 15 == 0:
+                    self._check_icon_present()
+                    self._show_live_preview()
                 return None
-            self._sampling_state = "idle"
             self._seq_triggered = False
+            if self._icon_detection_enabled:
+                # After cooldown, re-enter icon detection cycle
+                icon_present = self._check_icon_present()
+                if icon_present:
+                    print(f"[IconState] COOLDOWN → WAIT_GONE (icon still present)")
+                    self._sampling_state = "waiting_icon_gone"
+                    self._icon_status_text = "waiting for icon to disappear..."
+                else:
+                    print(f"[IconState] COOLDOWN → WAIT_ICON (icon absent)")
+                    self._sampling_state = "waiting_icon"
+                    self._icon_status_text = "waiting for icon..."
+                self._icon_consecutive_present = 0
+                self._icon_consecutive_absent = 0
+            else:
+                self._sampling_state = "idle"
 
-        # ── frame skip: skip anchor matching every N frames ──
+        # ── frame skip ──
         if self._anchor_skip > 0 and self._frame_idx % (self._anchor_skip + 1) != 0:
             return None
 
-        # ── normal path: full ROI capture + anchor matching ──
+        # ── normal path: ROI capture + anchor matching ──
+        if self._icon_detection_enabled and self._frame_idx % 60 == 0:
+            print(f"[IconState] anchor search active (gate open)")
         capture = self._capture_roi()
         if capture is None:
             return None
 
-        original_roi = capture.copy()
+        need_copy = self._show_preview or self._debug_save_enabled()
+        original_roi = capture.copy() if need_copy else capture
         self._dbg_roi = original_roi
         self._dbg_anchor_box = None
         self._dbg_sub_roi_box = None
         self._dbg_sub_roi_box_2 = None
-        self._dbg_pattern_box = None
-        self._dbg_pattern_box_2 = None
-        self._dbg_pattern_best_box = None
-        self._dbg_pattern_best_box_2 = None
         self._dbg_anchor_score = 0.0
-        self._dbg_pattern_score = 0.0
-        self._dbg_pattern_score_2 = 0.0
-        self._dbg_pattern_label = None
-        self._dbg_pattern_label_2 = None
         self._dbg_status_text = ""
 
         original_h, original_w = original_roi.shape[:2]
@@ -565,7 +863,6 @@ class CascadeDetector(threading.Thread):
     def _capture_roi(self) -> Optional[np.ndarray]:
         if self.roi is None or self._sct is None:
             return None
-
         try:
             img = self._sct.grab(self.roi)
             return np.array(img)[:, :, :3]
@@ -574,7 +871,6 @@ class CascadeDetector(threading.Thread):
             return None
 
     def _capture_sub_roi_screen(self, roi_box: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
-        """Capture a sub-ROI region directly from screen using its ROI-relative box."""
         if self.roi is None or self._sct is None:
             return None
         x, y, w, h = roi_box
@@ -591,11 +887,9 @@ class CascadeDetector(threading.Thread):
             self._logger.log(f"[CaptureSub] failed: {e}")
             return None
 
-    # ── debug preview (unified, called every frame) ───────────────────
+    # ── debug preview ────────────────────────────────────────────────
 
     def _show_live_preview(self) -> None:
-        """Draw and display the debug preview. Called every frame, FPS-throttled."""
-        # Destroy window when preview is turned off (same thread, safe)
         if not self._show_preview:
             if self._preview_window_open:
                 self._preview_window_open = False
@@ -604,35 +898,66 @@ class CascadeDetector(threading.Thread):
                 except Exception:
                     pass
             return
-        # During locked sampling the boxes are static — skip imshow/waitKey
         if self._sampling_state == "sampling" and self._locked_anchor_box is not None:
             return
-        if self._dbg_roi is None:
+        # Icon mode: allow preview with just icon thumbnail; normal mode: need ROI
+        if self._dbg_roi is None and not self._icon_detection_enabled:
+            return
+        if self._dbg_roi is None and self._dbg_icon_thumbnail is None:
             return
         now = time.time()
         if now - self._last_preview_time < 1.0 / self._preview_fps_limit:
             return
         self._last_preview_time = now
 
-        debug = self.debug_drawer.draw_boxes(
-            self._dbg_roi,
-            anchor_box=self._dbg_anchor_box,
-            sub_roi_box=self._dbg_sub_roi_box,
-            sub_roi_box_2=self._dbg_sub_roi_box_2,
-            pattern_box=self._dbg_pattern_box,
-            pattern_box_2=self._dbg_pattern_box_2,
-            pattern_best_box=self._dbg_pattern_best_box,
-            pattern_best_box_2=self._dbg_pattern_best_box_2,
-            anchor_score=self._dbg_anchor_score,
-            pattern_score=self._dbg_pattern_score,
-            pattern_score_2=self._dbg_pattern_score_2,
-            pattern_label=self._dbg_pattern_label,
-            pattern_label_2=self._dbg_pattern_label_2,
-        )
+        if self._dbg_roi is not None:
+            debug = self.debug_drawer.draw_boxes(
+                self._dbg_roi,
+                anchor_box=self._dbg_anchor_box,
+                sub_roi_box=self._dbg_sub_roi_box,
+                sub_roi_box_2=self._dbg_sub_roi_box_2,
+                anchor_score=self._dbg_anchor_score,
+            )
+            debug = np.ascontiguousarray(debug)
+        else:
+            # Icon-only mode: game ROI not yet captured, use placeholder
+            debug = np.zeros((360, 480, 3), dtype=np.uint8)
+
+        # ── icon thumbnail overlay (top-right corner) ──
+        if self._icon_detection_enabled and self._dbg_icon_thumbnail is not None:
+            thumb = self._dbg_icon_thumbnail
+            th, tw = thumb.shape[:2]
+            margin = 4
+            ix = debug.shape[1] - tw - margin
+            iy = 28  # below status bar
+            # Border: green if icon present, red if not
+            border_color = (0, 220, 0) if self._dbg_icon_present else (0, 0, 220)
+            cv2.rectangle(debug, (ix - 2, iy - 2), (ix + tw + 2, iy + th + 2),
+                          border_color, 2)
+            # Paste thumbnail
+            debug[iy:iy + th, ix:ix + tw] = thumb
+            # Score label
+            cv2.putText(debug, f"icon {self._dbg_icon_score:.2f}",
+                        (ix, iy - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35, border_color, 1)
+
         bar_h = 26
         cv2.rectangle(debug, (0, 0), (debug.shape[1], bar_h), (0, 0, 0), -1)
-        text = f"cycle={self._last_cycle_ms:.0f}ms"
-        if self._dbg_status_text:
+        eff_fps = 1000.0 / self._last_cycle_ms if self._last_cycle_ms > 0 else 0
+
+        # ── status bar text ──
+        text = f"cycle={self._last_cycle_ms:.0f}ms ({eff_fps:.0f}fps)"
+        if self._icon_detection_enabled:
+            # Colored dot + state text
+            dot = "(●)" if self._dbg_icon_present else "(○)"
+            state_map = {
+                "waiting_icon": f"{dot} waiting for icon",
+                "waiting_icon_gone": f"{dot} icon present",
+                "icon_delay": f"{dot} {self._dbg_status_text}",
+            }
+            icon_text = state_map.get(self._sampling_state, f"{dot} {self._dbg_status_text}")
+            text += f"  |  {icon_text}"
+        elif self._dbg_status_text:
             text += f"  {self._dbg_status_text}"
         cv2.putText(debug, text, (8, 17),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
@@ -645,7 +970,7 @@ class CascadeDetector(threading.Thread):
         except Exception:
             pass
 
-    # ── locked sampling (SEQ fast path, no anchor re-detection) ──────
+    # ── locked sampling ──────────────────────────────────────────────
 
     def _handle_locked_sampling(
         self, roi: Optional[np.ndarray], now: float
@@ -656,11 +981,10 @@ class CascadeDetector(threading.Thread):
 
         elapsed = now - self._sampling_start_time
 
-        # Show locked boxes on preview
         self._dbg_anchor_box = locked_anchor
         self._dbg_sub_roi_box = locked_sub_roi
         self._dbg_sub_roi_box_2 = locked_sub_roi_2
-        self._dbg_status_text = (f"locked sampling {len(self._sampling_frames)}"
+        self._dbg_status_text = (f"capturing {len(self._sampling_frames)}"
                                  f"/{self._seq_max_frames}")
 
         # Delay before first capture
@@ -676,7 +1000,6 @@ class CascadeDetector(threading.Thread):
         t_cap = time.time()
 
         if self._debug_save_enabled():
-            # Debug mode: need full ROI for rich debug images
             if roi is None:
                 roi = self._capture_roi()
                 if roi is None:
@@ -689,14 +1012,12 @@ class CascadeDetector(threading.Thread):
                 sub_img_2 = roi[sy2:sy2 + sh2, sx2:sx2 + sw2].copy()
             roi_img = roi.copy()
         else:
-            # Fast path: capture sub-ROIs directly from screen
             sub_img = self._capture_sub_roi_screen(locked_sub_roi)
             sub_img_2 = None
             if locked_sub_roi_2 is not None:
                 sub_img_2 = self._capture_sub_roi_screen(locked_sub_roi_2)
             roi_img = None
 
-        # Store first-frame captures for screenshot preview (not overwritten)
         if self._sampling_seq_idx == 0:
             self._latest_sub_roi1 = sub_img
             self._latest_sub_roi2 = sub_img_2
@@ -704,7 +1025,7 @@ class CascadeDetector(threading.Thread):
         t_cap = time.time() - t_cap
 
         if sub_img is None or sub_img.size == 0:
-            return None  # capture failed, skip this frame
+            return None
 
         sf = SequenceFrame(
             index=self._sampling_seq_idx,
@@ -713,8 +1034,7 @@ class CascadeDetector(threading.Thread):
             sub_roi_image=sub_img,
             anchor_box=locked_anchor,
             sub_roi_box=locked_sub_roi,
-            sharpness=calculate_sharpness(sub_img)
-            if self._seq_use_sharpness else 0.0,
+            sharpness=calculate_sharpness(sub_img) if self._seq_use_sharpness else 0.0,
             sub_roi_image_2=sub_img_2,
             sub_roi_box_2=locked_sub_roi_2,
         )
@@ -722,12 +1042,12 @@ class CascadeDetector(threading.Thread):
         self._sampling_frames.append(sf)
 
         collected = len(self._sampling_frames)
-        print(f"[Sequence] captured frame {collected}/{self._seq_max_frames} "
-              f"at elapsed={elapsed:.3f}s cap={t_cap*1000:.1f}ms")
+        print(f"[Capture] frame {collected}/{self._seq_max_frames} "
+              f"elapsed={elapsed:.3f}s cap={t_cap*1000:.1f}ms")
 
-        # Screenshot-only mode: return immediately, skip all pattern matching
-        if self._screenshot_only:
-            print("[Sequence] screenshot-only: frame captured, skipping pattern match")
+        # Screenshot taken — enter cooldown immediately
+        if collected >= self._seq_max_frames:
+            print(f"[Capture] done — {collected} frame(s), entering cooldown")
             self._sampling_frames.clear()
             self._locked_anchor_box = None
             self._locked_sub_roi = None
@@ -735,26 +1055,21 @@ class CascadeDetector(threading.Thread):
             self._sampling_state = "cooldown"
             self._seq_triggered = True
             self._cooldown_until = now + self._cooldown_seconds
-            self._dbg_sub_roi_box = locked_sub_roi
-            self._dbg_sub_roi_box_2 = locked_sub_roi_2
             return CascadeDetectionResult(
                 matched=False, label=None,
-                anchor_result=None, pattern_result=None,
-                sub_roi_box=locked_sub_roi, anchor_box=locked_anchor,
-                sub_roi_box_2=locked_sub_roi_2, debug_frame=None,
-                status="no_match", mode="SEQ",
+                anchor_result=None,
+                sub_roi_box=locked_sub_roi,
+                anchor_box=locked_anchor,
+                sub_roi_box_2=locked_sub_roi_2,
+                debug_frame=None,
+                status="no_match",
                 sub_roi1_image=self._latest_sub_roi1,
                 sub_roi2_image=self._latest_sub_roi2,
             )
 
-        # Defer all pattern matching to finalize — don't block the capture loop.
-        if collected >= self._seq_max_frames:
-            print("[Sequence] all frames captured, finalizing")
-            return self._finalize_sampling(now, roi, locked_anchor, locked_sub_roi)
-
         return None
 
-    # ── sequence mode ────────────────────────────────────────────────
+    # ── sequence trigger ─────────────────────────────────────────────
 
     def _handle_sequence_frame(
         self,
@@ -763,8 +1078,6 @@ class CascadeDetector(threading.Thread):
         anchor_box: Optional[Tuple[int, int, int, int]],
         now: float,
     ) -> Optional[CascadeDetectionResult]:
-        # cooldown is handled by fast-path in _detect_one_frame,
-        # so here only idle state is possible.
         if not anchor_result.matched or anchor_box is None:
             self._seq_triggered = False
             self._logger.log(
@@ -772,44 +1085,41 @@ class CascadeDetector(threading.Thread):
             return None
 
         if not self._seq_triggered:
-            self._start_sampling(roi, anchor_box, anchor_result, now)
-            # Transition to sampling — next frame will use locked fast path
+            self._start_sampling(roi, anchor_box, now)
             self._dbg_anchor_box = anchor_box
             self._dbg_sub_roi_box = self._locked_sub_roi
             self._dbg_sub_roi_box_2 = self._locked_sub_roi_2
-            return CascadeDetectionResult(matched=False, label=None,
-                anchor_result=anchor_result, pattern_result=None,
+            return CascadeDetectionResult(
+                matched=False, label=None,
+                anchor_result=anchor_result,
                 sub_roi_box=self._locked_sub_roi,
                 anchor_box=anchor_box,
-                sub_roi_box_2=self._locked_sub_roi_2, debug_frame=None,
-                status="sampling", mode="SEQ",
+                sub_roi_box_2=self._locked_sub_roi_2,
+                debug_frame=None,
+                status="sampling",
                 sub_roi1_image=self._latest_sub_roi1,
-                sub_roi2_image=self._latest_sub_roi2)
+                sub_roi2_image=self._latest_sub_roi2,
+            )
 
         return None
 
     def _start_sampling(self, roi: np.ndarray,
                         anchor_box: Tuple[int, int, int, int],
-                        anchor_result: MatchResult, now: float) -> None:
+                        now: float) -> None:
         self._sampling_state = "sampling"
         self._sampling_frames.clear()
-        self._sampling_match_results_1.clear()
-        self._sampling_match_results_2.clear()
         self._sampling_seq_idx = 0
         self._sampling_start_time = now
         self._sampling_next_time = now + self._seq_sample_delay
-        self._anchor_lost_count = 0
 
-        # Lock anchor position — don't re-detect during this cycle
         h, w = roi.shape[:2]
         self._locked_anchor_box = anchor_box
 
         # Region 1
         sub_roi_cfg = self.config["sub_roi"]
-        self._cur_sub_roi = compute_sub_roi(anchor_box, (h, w), SubRoiConfig(
+        self._locked_sub_roi = compute_sub_roi(anchor_box, (h, w), SubRoiConfig(
             x_ratio=sub_roi_cfg["x_ratio"], y_ratio=sub_roi_cfg["y_ratio"],
             w_ratio=sub_roi_cfg["w_ratio"], h_ratio=sub_roi_cfg["h_ratio"]))
-        self._locked_sub_roi = self._cur_sub_roi
 
         # Region 2
         if self._roi2_enabled:
@@ -820,333 +1130,7 @@ class CascadeDetector(threading.Thread):
         else:
             self._locked_sub_roi_2 = None
 
-        print(f"[Sequence] Start sampling: delay={self._seq_sample_delay}s "
-              f"interval={self._seq_sample_interval}s max_frames={self._seq_max_frames} "
+        print(f"[Capture] Start: delay={self._seq_sample_delay}s "
+              f"interval={self._seq_sample_interval}s "
+              f"max_frames={self._seq_max_frames} "
               f"roi2={'on' if self._locked_sub_roi_2 else 'off'}")
-
-    def _finalize_sampling(
-        self,
-        now: float,
-        roi: np.ndarray,
-        anchor_box: Tuple[int, int, int, int],
-        sub_roi_box: Tuple[int, int, int, int],
-        seq_result_1: Optional[SequenceDetectionResult] = None,
-        seq_result_2: Optional[SequenceDetectionResult] = None,
-    ) -> Optional[CascadeDetectionResult]:
-        # Copy frames/results for analysis, then clear mutable state.
-        frames = list(self._sampling_frames)
-        fr1_list: List[FrameMatchResult] = list(self._sampling_match_results_1)
-        fr2_list: List[FrameMatchResult] = list(self._sampling_match_results_2)
-        sub_roi_box_2 = self._locked_sub_roi_2
-        self._sampling_frames.clear()
-        self._sampling_match_results_1.clear()
-        self._sampling_match_results_2.clear()
-        self._locked_anchor_box = None
-        self._locked_sub_roi = None
-        self._locked_sub_roi_2 = None
-
-        self._sampling_state = "cooldown"
-        self._seq_triggered = True
-        self._cooldown_until = now + self._cooldown_seconds
-
-        n_frames = len(frames)
-        print(f"[Sequence] collected {n_frames} frames, finalizing...")
-
-        if n_frames == 0:
-            self._dbg_sub_roi_box = sub_roi_box
-            return CascadeDetectionResult(matched=False, label=None,
-                anchor_result=None, pattern_result=None,
-                sub_roi_box=sub_roi_box, debug_frame=None,
-                status="no_match", mode="SEQ",
-                sub_roi1_image=self._latest_sub_roi1,
-                sub_roi2_image=self._latest_sub_roi2)
-
-        # --- ROI1 voting (with early termination) ---
-        if seq_result_1 is None:
-            matched_idx1 = {fr.frame_index for fr in fr1_list}
-            for sf in frames:
-                if sf.index not in matched_idx1:
-                    t = time.time()
-                    fr = match_single_frame_to_patterns(
-                        sf.sub_roi_image, sf.sub_roi_box, sf.index,
-                        self.cache.get_pattern_groups(), roi_name="roi1",
-                        norm_width=self._pat_norm_width)
-                    fr1_list.append(fr)
-                    print(f"[Finalize] roi1 frame {sf.index} label={fr.label} "
-                          f"score={fr.score:.2f} took={time.time()-t:.3f}s")
-                    # Early vote: stop if enough votes already
-                    er = vote_frame_results(
-                        fr1_list, self._seq_min_votes, self._seq_min_avg)
-                    if er.matched:
-                        print(f"[Finalize] roi1 early stop: {er.label} "
-                              f"votes={er.vote_count} avg={er.final_score:.2f}")
-                        break
-            seq_result_1 = vote_frame_results(
-                fr1_list, self._seq_min_votes, self._seq_min_avg)
-
-        # --- ROI2 voting (with early termination) ---
-        if self._roi2_enabled and self.cache.get_pattern_groups_2():
-            if seq_result_2 is None:
-                matched_idx2 = {fr.frame_index for fr in fr2_list}
-                for sf in frames:
-                    if sf.index not in matched_idx2 and sf.sub_roi_image_2 is not None:
-                        t = time.time()
-                        fr = match_single_frame_to_patterns(
-                            sf.sub_roi_image_2, sf.sub_roi_box_2, sf.index,
-                            self.cache.get_pattern_groups_2(), roi_name="roi2",
-                            norm_width=self._pat_norm_width)
-                        fr2_list.append(fr)
-                        print(f"[Finalize] roi2 frame {sf.index} label={fr.label} "
-                              f"score={fr.score:.2f} took={time.time()-t:.3f}s")
-                        er = vote_frame_results(
-                            fr2_list, self._seq_min_votes, self._seq_min_avg)
-                        if er.matched:
-                            print(f"[Finalize] roi2 early stop: {er.label} "
-                                  f"votes={er.vote_count} avg={er.final_score:.2f}")
-                            break
-                seq_result_2 = vote_frame_results(
-                    fr2_list, self._seq_min_votes, self._seq_min_avg)
-        else:
-            seq_result_2 = None
-
-        # --- Combined result ---
-        label1 = seq_result_1.label if seq_result_1.matched else None
-        label2 = seq_result_2.label if (seq_result_2 and seq_result_2.matched) else None
-        fallback = (self.config.get("result_text_overlay", {})
-                    .get("roi_fallback", ""))
-        print(f"[Finalize] labels: l1={label1} l2={label2} "
-              f"roi2_enabled={self._roi2_enabled} fallback='{fallback}'")
-
-        if label1 and label2:
-            combined_label = f"{label1} + {label2}"
-        elif label1:
-            if self._roi2_enabled and fallback:
-                combined_label = f"{label1} + {fallback}"
-            else:
-                combined_label = label1
-        elif label2:
-            if fallback:
-                combined_label = f"{fallback} + {label2}"
-            else:
-                combined_label = label2
-        else:
-            combined_label = None
-
-        if self._require_roi2 and self._roi2_enabled:
-            matched = bool(label1 and label2)
-        else:
-            matched = bool(label1 or label2)
-
-        votes_str = (f"r1={seq_result_1.vote_count}/{n_frames}"
-                     + (f" r2={seq_result_2.vote_count}/{n_frames}" if seq_result_2 else ""))
-
-        if matched:
-            print(f"[Sequence] final matched=True label={combined_label} votes={votes_str}")
-            match_dur = self.config.get("overlay", {}).get("match_show_seconds", 3.0)
-            self._cooldown_until = max(self._cooldown_until, now + float(match_dur))
-        else:
-            print(f"[Sequence] final matched=False label1={label1} label2={label2} "
-                  f"votes={votes_str}")
-
-        # --- Populate seq_result with dual labels ---
-        seq_result_1.label_1 = label1
-        seq_result_1.label_2 = label2
-        seq_result_1.final_score_1 = seq_result_1.final_score
-        seq_result_1.vote_count_1 = seq_result_1.vote_count
-        if seq_result_2:
-            seq_result_1.label_2 = label2
-            seq_result_1.final_score_2 = seq_result_2.final_score
-            seq_result_1.vote_count_2 = seq_result_2.vote_count
-        seq_result_1.label = combined_label
-        seq_result_1.matched = matched
-
-        # --- Save selected frames ---
-        if self._save_selected_enabled():
-            all_fr = fr1_list + fr2_list
-            self._save_selected_voting_frames(frames, all_fr)
-
-        # --- Debug frame ---
-        debug_frame = self.debug_drawer.draw_boxes(
-            roi, anchor_box=anchor_box,
-            sub_roi_box=sub_roi_box, sub_roi_box_2=sub_roi_box_2,
-            pattern_box=None, pattern_best_box=None,
-            pattern_box_2=None, pattern_best_box_2=None,
-            anchor_score=0.0, pattern_score=0.0, pattern_label=None)
-        if debug_frame is not None:
-            debug_frame = np.ascontiguousarray(debug_frame)
-
-        # Draw roi1 best box
-        best_fr1 = None
-        for fr in seq_result_1.frame_results:
-            if fr.frame_index == seq_result_1.best_frame_index and fr.box_in_roi:
-                best_fr1 = fr
-                break
-        if debug_frame is not None and best_fr1 and best_fr1.box_in_roi:
-            px, py, pw, ph = best_fr1.box_in_roi
-            color = (0, 255, 0) if best_fr1.matched else (0, 0, 255)
-            cv2.rectangle(debug_frame, (px, py), (px + pw, py + ph), color, 2)
-            cv2.putText(debug_frame, f"{best_fr1.label or ''} {best_fr1.score:.2f}",
-                        (px, py - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-        # Draw roi2 best box
-        if seq_result_2:
-            best_fr2 = None
-            for fr in seq_result_2.frame_results:
-                if fr.frame_index == seq_result_2.best_frame_index and fr.box_in_roi:
-                    best_fr2 = fr
-                    break
-            if debug_frame is not None and best_fr2 and best_fr2.box_in_roi:
-                px, py, pw, ph = best_fr2.box_in_roi
-                color = (255, 255, 0) if best_fr2.matched else (0, 140, 255)
-                cv2.rectangle(debug_frame, (px, py), (px + pw, py + ph), color, 2)
-                cv2.putText(debug_frame, f"{best_fr2.label or ''} {best_fr2.score:.2f}",
-                            (px, py - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-        return CascadeDetectionResult(
-            matched=matched,
-            label=combined_label,
-            anchor_result=None,
-            pattern_result=MatchResult(
-                stage="pattern", label=combined_label or "unknown",
-                matched=matched,
-                score=seq_result_1.final_score,
-                box=best_fr1.box_in_roi if best_fr1 else None,
-                template_path=best_fr1.template_path if best_fr1 else None,
-                scale=best_fr1.scale if best_fr1 else None,
-            ),
-            sub_roi_box=sub_roi_box,
-            sub_roi_box_2=sub_roi_box_2,
-            debug_frame=debug_frame,
-            status="matched" if matched else "no_match",
-            mode="SEQ",
-            sequence_result=seq_result_1,
-            match_votes=votes_str,
-            sub_roi1_image=self._latest_sub_roi1,
-            sub_roi2_image=self._latest_sub_roi2,
-        )
-
-    # ── debug logging ────────────────────────────────────────────────
-
-    def _log_debug_info(
-        self,
-        anchor_result: MatchResult,
-        sub_roi_box: Optional[Tuple[int, int, int, int]],
-        pattern_result: Optional[MatchResult],
-        best_pattern_score: float,
-    ) -> None:
-        if not self.config.get("debug", {}).get("print_scores", True):
-            return
-
-        if anchor_result.matched:
-            scale_text = (
-                f"{anchor_result.scale:.2f}"
-                if anchor_result.scale is not None
-                else "N/A"
-            )
-
-            self._logger.log(
-                f"[Anchor] matched=True score={anchor_result.score:.2f} "
-                f"template={anchor_result.template_path or 'N/A'} "
-                f"scale={scale_text} box={anchor_result.box}"
-            )
-
-            if sub_roi_box:
-                self._logger.log(f"[SubROI] box={sub_roi_box}")
-
-            if pattern_result:
-                st = "True" if pattern_result.matched else "False"
-                self._logger.log(
-                    f"[Pattern:{pattern_result.label}] matched={st} "
-                    f"best_score={pattern_result.score:.2f} "
-                    f"template={pattern_result.template_path or 'N/A'} "
-                    f"scale={pattern_result.scale}"
-                )
-        else:
-            self._logger.log(
-                f"[Anchor] matched=False best_score={anchor_result.score:.2f}"
-            )
-            self._logger.log("[Skip] Anchor not found, skip pattern matching.")
-
-    # ── sequence debug saving ────────────────────────────────────────
-
-    def _save_selected_voting_frames(
-        self,
-        selected_frames: List[SequenceFrame],
-        frame_results: List[FrameMatchResult],
-    ) -> None:
-        """
-        Save only the frames actually used for voting.
-
-        This is the behavior you want:
-        - no raw sequence spam;
-        - only selected_frame_count frames;
-        - frames are collected after sample_delay_seconds;
-        - controlled by GUI screenshot switch.
-        """
-        result_map = {fr.frame_index: fr for fr in frame_results}
-
-        for sf in selected_frames:
-            fr = result_map.get(sf.index)
-            if fr is None:
-                continue
-            self._save_selected_frame(sf, fr)
-
-    def _save_selected_frame(
-        self,
-        sf: SequenceFrame,
-        fr: FrameMatchResult,
-    ) -> None:
-        try:
-            os.makedirs(self._seq_selected_dir, exist_ok=True)
-
-            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(sf.timestamp))
-            sim_str = f"_sim{sf.avg_similarity:.2f}" if sf.avg_similarity > 0 else ""
-
-            name = (
-                f"selected_{ts}_f{sf.index:03d}"
-                f"{sim_str}"
-                f"_shp{sf.sharpness:.0f}"
-                f"_label{fr.label or 'none'}"
-                f"_score{fr.score:.2f}.png"
-            )
-
-            path = os.path.join(self._seq_selected_dir, name)
-
-            if sf.roi_image is None:
-                return  # no full ROI to paint on — debug save skips
-            roi_debug = sf.roi_image.copy()
-
-            ax, ay, aw, ah = sf.anchor_box
-            cv2.rectangle(roi_debug, (ax, ay), (ax + aw, ay + ah), (255, 0, 0), 2)
-
-            sx, sy, sw, sh = sf.sub_roi_box
-            cv2.rectangle(roi_debug, (sx, sy), (sx + sw, sy + sh), (0, 255, 255), 2)
-            cv2.putText(roi_debug, "ROI1", (sx, sy - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-            if sf.sub_roi_box_2 is not None:
-                sx2, sy2, sw2, sh2 = sf.sub_roi_box_2
-                cv2.rectangle(roi_debug, (sx2, sy2), (sx2 + sw2, sy2 + sh2),
-                              (0, 200, 255), 2)
-                cv2.putText(roi_debug, "ROI2", (sx2, sy2 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
-
-            if fr.box_in_roi is not None:
-                px, py, pw, ph = fr.box_in_roi
-                if fr.roi_name == "roi2":
-                    color = (255, 255, 0) if fr.matched else (0, 140, 255)
-                else:
-                    color = (0, 255, 0) if fr.matched else (0, 0, 255)
-                cv2.rectangle(roi_debug, (px, py), (px + pw, py + ph), color, 2)
-                cv2.putText(roi_debug,
-                            f"{fr.roi_name}:{fr.label or ''} {fr.score:.2f}",
-                            (px, max(0, py - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-
-            # cv2.imwrite fails on Chinese paths — use imencode + tofile
-            _, buf = cv2.imencode('.png', roi_debug)
-            buf.tofile(path)
-            print(f"[Debug] saved selected voting frame: {path}")
-
-        except Exception as e:
-            print(f"[Debug] failed to save selected frame: {e}")

@@ -1,7 +1,7 @@
-"""Template reading and caching. Loads all templates once at startup, pre-scales variants."""
+"""Template reading and caching. Loads anchor templates once at startup, pre-scales variants."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -46,50 +46,38 @@ class TemplateGroup:
 
 
 class TemplateCache:
-    """Loads and caches all templates at startup. Variants are pre-scaled once."""
+    """Loads and caches anchor templates at startup. Variants are pre-scaled once."""
 
     def __init__(self, config: dict):
         self._config = config
         self.anchor_group: Optional[TemplateGroup] = None
-        self.pattern_groups: Dict[str, TemplateGroup] = {}
-        self.pattern_groups_2: Dict[str, TemplateGroup] = {}
-        self._load_all(config)
+        self.icon_group: Optional[TemplateGroup] = None
+        self._load_anchor(config)
+        self._load_icon(config)
 
     # ── public ──────────────────────────────────────────────────────────
 
     def get_anchor_templates(self) -> Optional[TemplateGroup]:
         return self.anchor_group
 
-    def get_pattern_groups(self) -> Dict[str, TemplateGroup]:
-        return self.pattern_groups
-
-    def get_pattern_groups_2(self) -> Dict[str, TemplateGroup]:
-        return self.pattern_groups_2
+    def get_icon_template(self) -> Optional[TemplateItem]:
+        """Return the first icon template, or None if not loaded."""
+        if self.icon_group and self.icon_group.items:
+            return self.icon_group.items[0]
+        return None
 
     @property
     def anchor_count(self) -> int:
         return len(self.anchor_group.items) if self.anchor_group else 0
 
-    @property
-    def pattern_count(self) -> int:
-        return sum(len(g.items) for g in self.pattern_groups.values())
-
-    @property
-    def pattern_count_2(self) -> int:
-        return sum(len(g.items) for g in self.pattern_groups_2.values())
-
     def reload(self, config: dict) -> None:
         self._config = config
         self.anchor_group = None
-        self.pattern_groups.clear()
-        self.pattern_groups_2.clear()
-        self._load_all(config)
-        cnt2 = self.pattern_count_2
-        print(f"[Cache] Reloaded: {self.anchor_count} anchor templates, "
-              f"{self.pattern_count} p1 templates across "
-              f"{len(self.pattern_groups)} groups"
-              + (f", {cnt2} p2 templates across "
-                 f"{len(self.pattern_groups_2)} groups" if cnt2 else ""))
+        self.icon_group = None
+        self._load_anchor(config)
+        self._load_icon(config)
+        icon_info = f", {len(self.icon_group.items)} icon" if self.icon_group and self.icon_group.items else ""
+        print(f"[Cache] Reloaded: {self.anchor_count} anchor templates{icon_info}")
 
     def rescale_anchor(self, roi_width: int, norm_width: int) -> None:
         """Re-pre-scale anchor templates for the current ROI (adaptive scale)."""
@@ -107,39 +95,47 @@ class TemplateCache:
 
     # ── internal ────────────────────────────────────────────────────────
 
-    def _load_all(self, config: dict) -> None:
-        # Anchor: deferred pre-scale (scales depend on ROI)
+    def _load_anchor(self, config: dict) -> None:
+        ac = config["anchor"]
         self.anchor_group = self._load_group(
-            config["anchor"]["templates"],
-            config["anchor"]["label"],
-            config["anchor"]["threshold"],
-            config["anchor"]["scale_min"],
-            config["anchor"]["scale_max"],
-            config["anchor"]["scale_steps"],
-            config["anchor"]["use_grayscale"],
-            with_mask=False,
-            pre_scale=False,
-            preprocess_mode=config["anchor"].get("preprocess_mode", "none"),
-            gamma=config["anchor"].get("gamma", 0.75),
+            ac["templates"], ac["label"], ac["threshold"],
+            ac["scale_min"], ac["scale_max"], ac["scale_steps"],
+            ac["use_grayscale"],
+            with_mask=False, pre_scale=False,
+            preprocess_mode=ac.get("preprocess_mode", "none"),
+            gamma=ac.get("gamma", 0.75),
         )
 
-        for name, pcfg in config.get("patterns", {}).items():
-            group = self._load_group(
-                pcfg["templates"], name, pcfg["threshold"],
-                pcfg["scale_min"], pcfg["scale_max"], pcfg["scale_steps"],
-                pcfg["use_grayscale"],
-                with_mask=True, pre_scale=True,
-            )
-            self.pattern_groups[name] = group
-
-        for name, pcfg in config.get("patterns_2", {}).items():
-            group = self._load_group(
-                pcfg["templates"], name, pcfg["threshold"],
-                pcfg["scale_min"], pcfg["scale_max"], pcfg["scale_steps"],
-                pcfg["use_grayscale"],
-                with_mask=True, pre_scale=True,
-            )
-            self.pattern_groups_2[name] = group
+    def _load_icon(self, config: dict) -> None:
+        """Load icon template(s) — single-scale, no pre-scaling needed."""
+        ic = config.get("icon_detection", {})
+        if not ic.get("enabled", False):
+            self.icon_group = None
+            return
+        templates = ic.get("templates", [])
+        if not templates:
+            print("[Cache] Icon detection enabled but no templates configured")
+            self.icon_group = None
+            return
+        self.icon_group = self._load_group(
+            [templates[0]],  # single template for detection
+            "icon",
+            ic.get("threshold", 0.75),
+            ic.get("scale_min", 0.8),
+            ic.get("scale_max", 1.2),
+            ic.get("scale_steps", 5),
+            ic.get("use_grayscale", True),
+            with_mask=False,
+            pre_scale=True,
+            preprocess_mode=ic.get("preprocess_mode", "none"),
+            gamma=ic.get("gamma", 0.75),
+        )
+        if not self.icon_group or not self.icon_group.items:
+            print(f"[Cache] Icon template failed to load: {templates[0]}")
+        else:
+            item = self.icon_group.items[0]
+            print(f"[Cache] Icon template loaded: {templates[0]} "
+                  f"({item.image_gray.shape[1]}x{item.image_gray.shape[0]})")
 
     def _load_group(
         self, paths, label, threshold, scale_min, scale_max, scale_steps,

@@ -7,7 +7,7 @@ from typing import Optional
 from image_utils import resolve_path
 
 from PyQt5.QtWidgets import (
-    QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSlider, QDoubleSpinBox, QSpinBox, QCheckBox,
     QComboBox, QListWidget, QListWidgetItem, QLineEdit,
     QFileDialog, QMessageBox, QGroupBox, QFormLayout, QInputDialog,
@@ -879,25 +879,21 @@ class RuntimeTab(QWidget):
     def _apply_resolution_preset(self, res: str):
         self.config["game_resolution"] = res
         presets = {
-            "720p":  {"anchor": (0.55, 0.65, 4), "pattern": (0.35, 0.75, 6)},
-            "1080p": {"anchor": (0.75, 0.90, 5), "pattern": (0.50, 1.05, 7)},
-            "2K":    {"anchor": (0.90, 1.25, 5), "pattern": (0.65, 1.35, 8)},
-            "4K":    {"anchor": (1.35, 1.80, 5), "pattern": (1.00, 1.70, 8)},
+            "720p":  (0.55, 0.65, 4),
+            "1080p": (0.75, 0.90, 5),
+            "2K":    (0.90, 1.25, 5),
+            "4K":    (1.35, 1.80, 5),
         }
         p = presets.get(res, presets["2K"])
         # Update anchor
         ac = self.config.setdefault("anchor", {})
         ac["threshold"] = 0.85
-        smin, smax, ssteps = p["anchor"]
+        smin, smax, ssteps = p
         # Duo mode: reduce anchor scale by 0.1
         if self.duo_btn.isChecked():
             smin = max(0.3, smin - 0.1)
             smax = max(smin + 0.1, smax - 0.1)
         ac["scale_min"], ac["scale_max"], ac["scale_steps"] = smin, smax, ssteps
-        # Update all pattern groups
-        for pk in ("patterns", "patterns_2"):
-            for _, pcfg in self.config.get(pk, {}).items():
-                pcfg["scale_min"], pcfg["scale_max"], pcfg["scale_steps"] = p["pattern"]
         self.resolution_changed.emit()
 
     def collect(self, cfg: dict):
@@ -1051,48 +1047,7 @@ class ResultTextTab(QWidget):
         counter_form.addRow("最多显示条目", self.counter_top_n_spin)
         layout.addWidget(counter_group)
 
-        # ── bloodline colors (patterns / ROI1) ──
-        bl_colors = cfg.get("bloodline_colors", {})
-        patterns1 = self.config.get("patterns", {})
-        if patterns1:
-            bl_group = QGroupBox("血脉颜色 (样本1)")
-            bl_group_layout = QFormLayout(bl_group)
-            self._bl_color_edits = {}
-            for pname in patterns1:
-                default = bl_colors.get(pname, "#FFD700")
-                edit = _make_color_row(bl_group_layout, pname, default)
-                self._bl_color_edits[pname] = edit
-            layout.addWidget(bl_group)
-
-        # ── attribute colors (patterns_2 / ROI2) ──
-        attr_colors = cfg.get("attribute_colors", {})
-        patterns2 = self.config.get("patterns_2", {})
-        if patterns2:
-            attr_group = QGroupBox("属性颜色 (样本2)")
-            attr_group_layout = QFormLayout(attr_group)
-            self._attr_color_edits = {}
-            for pname in patterns2:
-                default = attr_colors.get(pname, "#FFD700")
-                edit = _make_color_row(attr_group_layout, pname, default)
-                self._attr_color_edits[pname] = edit
-            layout.addWidget(attr_group)
-
-        # ── legacy label_colors (fallback) ──
-        lbl_colors = cfg.get("label_colors", {})
-        all_patterns = {**patterns1, **patterns2}
-        if all_patterns:
-            lc_group = QGroupBox("兼容颜色 (label_colors)")
-            lc_group_layout = QFormLayout(lc_group)
-            self._label_color_edits = {}
-            for pname in all_patterns:
-                default = lbl_colors.get(pname, "#FFD700")
-                tag = " [ROI2]" if pname in patterns2 and pname not in patterns1 else ""
-                edit = _make_color_row(lc_group_layout, pname + tag, default)
-                self._label_color_edits[pname] = edit
-            layout.addWidget(lc_group)
-
-        hint = QLabel("血脉=样本1匹配结果，属性=样本2匹配结果。\n"
-                      "面板可拖动标题栏移动，右下角拖拽调整大小。\n"
+        hint = QLabel("面板可拖动标题栏移动，右下角拖拽调整大小。\n"
                       "按 Alt 键可临时显示鼠标进行交互。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888; font-size: 11px;")
@@ -1130,38 +1085,203 @@ class ResultTextTab(QWidget):
         for k in ("x", "y", "width", "height", "min_width", "min_height"):
             if k in old:
                 rt.setdefault(k, old[k])
-        if hasattr(self, '_bl_color_edits'):
-            bc = {}
-            for pname, edit in self._bl_color_edits.items():
-                bc[pname] = edit.text()
-            rt["bloodline_colors"] = bc
-        if hasattr(self, '_attr_color_edits'):
-            ac = {}
-            for pname, edit in self._attr_color_edits.items():
-                ac[pname] = edit.text()
-            rt["attribute_colors"] = ac
-        if hasattr(self, '_label_color_edits'):
-            lc = {}
-            for pname, edit in self._label_color_edits.items():
-                lc[pname] = edit.text()
-            rt["label_colors"] = lc
 
 
 # ── Wheel blocker event filter ────────────────────────────────────────
 
 
 class _WheelBlocker(QObject):
-    """Block mouse wheel on spinboxes/sliders/combos, allow on scroll areas."""
+    """全局拦截设置面板内的滚轮事件，防止误触修改数值。
+
+    安装到 QApplication 实例上，判断事件目标是否属于设置面板。
+    仅放行 QScrollArea 和 QListWidget 内的滚轮（列表滚动）。"""
+    def __init__(self, settings_window):
+        super().__init__()
+        self._settings_window = settings_window
+
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Wheel:
-            w = obj
-            while w is not None:
-                if isinstance(w, (QAbstractSpinBox, QSlider, QComboBox)):
-                    return True  # block
-                if isinstance(w, (QScrollArea, QListWidget)):
-                    return False  # allow
-                w = w.parent()
-        return False
+        if event.type() != QEvent.Wheel:
+            return False
+        # 判断事件目标是否在设置面板内
+        w = obj
+        while w is not None:
+            if w is self._settings_window:
+                break
+            w = w.parent()
+        else:
+            return False  # 不在设置面板内，不拦截
+        # 仅放行滚动区域和列表控件
+        w = obj
+        while w is not None:
+            if isinstance(w, (QScrollArea, QListWidget)):
+                return False  # allow scroll
+            w = w.parent()
+        # 其他所有控件（spinbox/slider/combo 等）拦截滚轮
+        return True
+
+
+# ── Icon Detection Tab ──────────────────────────────────────────────
+
+class IconDetectionTab(QWidget):
+    """Settings for icon-triggered screenshot mode."""
+
+    def __init__(self, config: dict, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        ic = self.config.get("icon_detection", {})
+
+        self.enabled_cb = QCheckBox("启用图标检测模式")
+        self.enabled_cb.setChecked(ic.get("enabled", False))
+        self.enabled_cb.toggled.connect(self._on_enabled_toggled)
+        form.addRow(self.enabled_cb)
+
+        self.thresh_slider, self.thresh_spin = _make_slider_spin_double(
+            self, form, "匹配阈值", 0.50, 0.99, ic.get("threshold", 0.75), 0.01, 2)
+
+        self.gray_cb = QCheckBox("灰度匹配")
+        self.gray_cb.setChecked(ic.get("use_grayscale", True))
+        form.addRow(self.gray_cb)
+
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("预处理模式"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["none", "gamma", "otsu"])
+        self.mode_combo.setCurrentText(ic.get("preprocess_mode", "none"))
+        mode_layout.addWidget(self.mode_combo, 1)
+        form.addRow(mode_layout)
+
+        self._gamma_row = QHBoxLayout()
+        lbl = QLabel("Gamma值")
+        lbl.setFixedWidth(120)
+        self._gamma_row.addWidget(lbl)
+        self.gamma_slider = QSlider(Qt.Horizontal)
+        self.gamma_slider.setRange(4, 40)
+        self.gamma_slider.setValue(int(ic.get("gamma", 0.75) / 0.05))
+        self._gamma_row.addWidget(self.gamma_slider, 1)
+        self.gamma_spin = QDoubleSpinBox()
+        self.gamma_spin.setRange(0.20, 2.00)
+        self.gamma_spin.setSingleStep(0.05)
+        self.gamma_spin.setDecimals(2)
+        self.gamma_spin.setValue(ic.get("gamma", 0.75))
+        self.gamma_spin.setFixedWidth(80)
+        self._gamma_row.addWidget(self.gamma_spin)
+        self.gamma_slider.valueChanged.connect(lambda v: self.gamma_spin.setValue(v * 0.05))
+        self.gamma_spin.valueChanged.connect(
+            lambda v: self.gamma_slider.blockSignals(True) or
+            self.gamma_slider.setValue(int(v / 0.05)) or
+            self.gamma_slider.blockSignals(False))
+        form.addRow(self._gamma_row)
+
+        self.delay_spin = QDoubleSpinBox()
+        self.delay_spin.setRange(0.0, 5.0)
+        self.delay_spin.setSingleStep(0.1)
+        self.delay_spin.setDecimals(1)
+        self.delay_spin.setValue(ic.get("disappear_delay_seconds", 0.5))
+        self.delay_spin.setSuffix(" 秒")
+        form.addRow("图标消失后延迟", self.delay_spin)
+
+        self.debounce_spin = QSpinBox()
+        self.debounce_spin.setRange(1, 30)
+        self.debounce_spin.setValue(ic.get("debounce_frames", 3))
+        self.debounce_spin.setSuffix(" 帧")
+        self.debounce_spin.setToolTip("防抖帧数：图标需连续出现/消失N帧才判定状态变化，\n"
+                                      "倒计时期间也用于冗余检测")
+        form.addRow("防抖帧数", self.debounce_spin)
+
+        offsets = ic.get("capture_offsets", [2.0, 2.5, 3.0])
+        self.offsets_edit = QLineEdit(", ".join(f"{x:.2f}" for x in offsets))
+        self.offsets_edit.setPlaceholderText("如: 2.00, 2.50, 3.00")
+        self.offsets_edit.setToolTip("门开后定时截帧的时间点（秒），逗号分隔")
+        form.addRow("截帧时间点", self.offsets_edit)
+
+        self.icon_scale_min_slider, self.icon_scale_min_spin = _make_slider_spin_double(
+            self, form, "图标最小缩放", 0.50, 1.50, ic.get("scale_min", 0.8), 0.05, 2)
+        self.icon_scale_max_slider, self.icon_scale_max_spin = _make_slider_spin_double(
+            self, form, "图标最大缩放", 0.50, 2.00, ic.get("scale_max", 1.2), 0.05, 2)
+        self.icon_scale_steps_spin = QSpinBox()
+        self.icon_scale_steps_spin.setRange(1, 20)
+        self.icon_scale_steps_spin.setValue(ic.get("scale_steps", 5))
+        form.addRow("图标缩放步数", self.icon_scale_steps_spin)
+
+        _add_separator(form)
+
+        tmpl_group = QGroupBox("图标模板")
+        tmpl_layout = QVBoxLayout(tmpl_group)
+        self.tmpl_list = QListWidget()
+        for p in ic.get("templates", []):
+            self.tmpl_list.addItem(p)
+        tmpl_layout.addWidget(self.tmpl_list)
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("+ 添加模板")
+        add_btn.clicked.connect(self._add_template)
+        btn_row.addWidget(add_btn)
+        del_btn = QPushButton("- 删除选中")
+        del_btn.clicked.connect(self._del_template)
+        btn_row.addWidget(del_btn)
+        tmpl_layout.addLayout(btn_row)
+        form.addRow(tmpl_group)
+
+        hint = QLabel("图标检测模式下，先框选游戏区域，再框选图标区域。\n"
+                      "图标出现→消失→延迟→截图→冷却→等待图标→循环。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(hint)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        self._on_enabled_toggled(self.enabled_cb.isChecked())
+
+    def _on_enabled_toggled(self, enabled):
+        for w in [self.thresh_spin, self.gray_cb, self.mode_combo,
+                  self.gamma_spin, self.delay_spin, self.debounce_spin,
+                  self.offsets_edit,
+                  self.icon_scale_min_spin, self.icon_scale_max_spin,
+                  self.icon_scale_steps_spin, self.tmpl_list]:
+            w.setEnabled(enabled)
+
+    def _add_template(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图标模板图片", resolve_path("templates/icon"),
+            "Images (*.png *.jpg *.jpeg *.bmp)")
+        if path:
+            idx = path.replace('\\', '/').find('templates/')
+            rel = path.replace('\\', '/')[idx:] if idx >= 0 else path
+            self.tmpl_list.addItem(rel)
+
+    def _del_template(self):
+        for item in self.tmpl_list.selectedItems():
+            self.tmpl_list.takeItem(self.tmpl_list.row(item))
+
+    def collect(self, cfg: dict):
+        ic = cfg.setdefault("icon_detection", {})
+        ic["enabled"] = self.enabled_cb.isChecked()
+        ic["threshold"] = self.thresh_spin.value()
+        ic["use_grayscale"] = self.gray_cb.isChecked()
+        ic["preprocess_mode"] = self.mode_combo.currentText()
+        ic["gamma"] = self.gamma_spin.value()
+        ic["disappear_delay_seconds"] = self.delay_spin.value()
+        ic["debounce_frames"] = self.debounce_spin.value()
+        try:
+            offsets = [float(x.strip()) for x in self.offsets_edit.text().split(",") if x.strip()]
+            ic["capture_offsets"] = sorted(offsets) if offsets else [2.0]
+        except ValueError:
+            ic["capture_offsets"] = [2.0, 2.5, 3.0]
+        ic["scale_min"] = self.icon_scale_min_spin.value()
+        ic["scale_max"] = self.icon_scale_max_spin.value()
+        ic["scale_steps"] = self.icon_scale_steps_spin.value()
+        ic["templates"] = [
+            self.tmpl_list.item(i).text()
+            for i in range(self.tmpl_list.count())
+        ]
+        old = self.config.get("icon_detection", {})
+        if "icon_roi" in old:
+            ic["icon_roi"] = old["icon_roi"]
 
 
 # ── Main Settings Window ─────────────────────────────────────────────
@@ -1202,23 +1322,21 @@ class SettingsWindow(QWidget):
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
 
-        # Block mouse wheel on spinboxes/sliders/combos
+        # 全局拦截设置面板内所有控件的滚轮事件
         self._wheel_blocker = _WheelBlocker(self)
-        self.installEventFilter(self._wheel_blocker)
+        QApplication.instance().installEventFilter(self._wheel_blocker)
 
         self.tabs = QTabWidget()
         self.anchor_tab = AnchorTab(self._working_config)
         self.subroi_tab = SubRoiTab(self._working_config)
         self.subroi2_tab = SubRoi2Tab(self._working_config)
-        self.patterns_tab = PatternsTab(self._working_config)
-        self.patterns2_tab = Patterns2Tab(self._working_config)
+        self.icon_tab = IconDetectionTab(self._working_config)
         self.runtime_tab = RuntimeTab(self._working_config)
         self.runtime_tab.resolution_changed.connect(self._on_resolution_changed)
         self.tabs.addTab(self.anchor_tab, "盲盒样本")
         self.tabs.addTab(self.subroi_tab, "识别区域1")
         self.tabs.addTab(self.subroi2_tab, "识别区域2")
-        self.tabs.addTab(self.patterns_tab, "样本1")
-        self.tabs.addTab(self.patterns2_tab, "样本2")
+        self.tabs.addTab(self.icon_tab, "图标检测")
         self.tabs.addTab(self.runtime_tab, "基础设置")
         self.result_text_tab = ResultTextTab(self._working_config)
         self.tabs.addTab(self.result_text_tab, "提示文字")
@@ -1253,9 +1371,6 @@ class SettingsWindow(QWidget):
         self.anchor_tab.scale_min_spin.setValue(ac.get("scale_min", 0.75))
         self.anchor_tab.scale_max_spin.setValue(ac.get("scale_max", 1.25))
         self.anchor_tab.scale_steps_spin.setValue(ac.get("scale_steps", 6))
-        # Refresh patterns tabs to show new scale values
-        self.patterns_tab._refresh_combo()
-        self.patterns2_tab._refresh_combo()
 
     def _load_all(self):
         """Refresh all tabs from the working config (e.g. after external change)."""
@@ -1263,20 +1378,16 @@ class SettingsWindow(QWidget):
         self.anchor_tab.config = self._working_config
         self.subroi_tab.config = self._working_config
         self.subroi2_tab.config = self._working_config
-        self.patterns_tab.config = self._working_config
-        self.patterns2_tab.config = self._working_config
+        self.icon_tab.config = self._working_config
         self.runtime_tab.config = self._working_config
         self.result_text_tab.config = self._working_config
-        self.patterns_tab._refresh_combo()
-        self.patterns2_tab._refresh_combo()
 
     def _collect_all(self) -> dict:
         """Gather values from all tabs into the working config, return it."""
         self.anchor_tab.collect(self._working_config)
         self.subroi_tab.collect(self._working_config)
         self.subroi2_tab.collect(self._working_config)
-        self.patterns_tab.collect(self._working_config)
-        self.patterns2_tab.collect(self._working_config)
+        self.icon_tab.collect(self._working_config)
         self.runtime_tab.collect(self._working_config)
         self.result_text_tab.collect(self._working_config)
         return self._working_config

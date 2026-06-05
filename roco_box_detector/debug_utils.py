@@ -28,15 +28,7 @@ class DebugDrawer:
         anchor_box: Optional[Tuple[int, int, int, int]] = None,
         sub_roi_box: Optional[Tuple[int, int, int, int]] = None,
         sub_roi_box_2: Optional[Tuple[int, int, int, int]] = None,
-        pattern_box: Optional[Tuple[int, int, int, int]] = None,
-        pattern_box_2: Optional[Tuple[int, int, int, int]] = None,
-        pattern_best_box: Optional[Tuple[int, int, int, int]] = None,
-        pattern_best_box_2: Optional[Tuple[int, int, int, int]] = None,
         anchor_score: float = 0.0,
-        pattern_score: float = 0.0,
-        pattern_score_2: float = 0.0,
-        pattern_label: Optional[str] = None,
-        pattern_label_2: Optional[str] = None,
     ) -> np.ndarray:
         """Draw detection boxes on a debug copy of the frame."""
         if not self.enabled or frame is None:
@@ -61,31 +53,6 @@ class DebugDrawer:
             cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 200, 255), 2)
             cv2.putText(debug, "ROI2", (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
-
-        if self.debug.get("draw_pattern_box"):
-            if pattern_box is not None:
-                x, y, w, h = pattern_box
-                cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                label = f"{pattern_label or 'pat'} {pattern_score:.2f}"
-                cv2.putText(debug, label, (x, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            elif pattern_best_box is not None:
-                x, y, w, h = pattern_best_box
-                cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                cv2.putText(debug, f"best {pattern_score:.2f}", (x, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
-
-            if pattern_box_2 is not None:
-                x, y, w, h = pattern_box_2
-                cv2.rectangle(debug, (x, y), (x + w, y + h), (255, 255, 0), 2)
-                label = f"{pattern_label_2 or 'pat2'} {pattern_score_2:.2f}"
-                cv2.putText(debug, label, (x, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            elif pattern_best_box_2 is not None:
-                x, y, w, h = pattern_best_box_2
-                cv2.rectangle(debug, (x, y), (x + w, y + h), (0, 140, 255), 2)
-                cv2.putText(debug, f"best2 {pattern_score_2:.2f}", (x, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 140, 255), 1)
 
         return debug
 

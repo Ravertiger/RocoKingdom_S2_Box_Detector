@@ -65,7 +65,7 @@ class ROISelector:
         # Fallback: primary monitor
         return monitors[0] if monitors else (0, 0, 1920, 1080)
 
-    def select(self) -> Optional[dict]:
+    def select(self, message: str = "拖拽鼠标框选区域") -> Optional[dict]:
         """Open an overlay on the monitor under the cursor. Returns ROI dict or None."""
         self._roi = None
         self._cancelled = False
@@ -89,7 +89,7 @@ class ROISelector:
         # Instructions — centered on THIS screen
         canvas.create_text(
             screen_w // 2, screen_h // 2 - 40,
-            text="拖拽鼠标框选游戏区域\nEsc 取消 | Enter 确认 (或松手确认)",
+            text=f"{message}\nEsc 取消 | Enter 确认 (或松手确认)",
             fill="white",
             font=("Microsoft YaHei", 18),
             justify=tk.CENTER,

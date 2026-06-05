@@ -83,17 +83,17 @@ class StartupDialog(QDialog):
 
         # Apply resolution preset
         presets = {
-            "720p":  {"anchor": (0.55, 0.65, 4), "pattern": (0.35, 0.75, 6)},
-            "1080p": {"anchor": (0.75, 0.90, 5), "pattern": (0.50, 1.05, 7)},
-            "2K":    {"anchor": (0.90, 1.25, 5), "pattern": (0.65, 1.35, 8)},
-            "4K":    {"anchor": (1.35, 1.80, 5), "pattern": (1.00, 1.70, 8)},
+            "720p":  (0.55, 0.65, 4),
+            "1080p": (0.75, 0.90, 5),
+            "2K":    (0.90, 1.25, 5),
+            "4K":    (1.35, 1.80, 5),
         }
         p = presets.get(res, presets["2K"])
         self.config["game_resolution"] = res
 
         ac = self.config.setdefault("anchor", {})
         ac["threshold"] = 0.85
-        ac["scale_min"], ac["scale_max"], ac["scale_steps"] = p["anchor"]
+        ac["scale_min"], ac["scale_max"], ac["scale_steps"] = p
 
         self.config["capture_mode"] = "duo" if is_duo else "solo"
 
@@ -101,11 +101,6 @@ class StartupDialog(QDialog):
         if is_duo:
             ac["scale_min"] = max(0.3, ac["scale_min"] - 0.1)
             ac["scale_max"] = max(ac["scale_min"] + 0.1, ac["scale_max"] - 0.1)
-
-        # Update pattern groups
-        for pk in ("patterns", "patterns_2"):
-            for _, pcfg in self.config.get(pk, {}).items():
-                pcfg["scale_min"], pcfg["scale_max"], pcfg["scale_steps"] = p["pattern"]
 
         # Mark startup complete
         self.config["startup_complete"] = True

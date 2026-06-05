@@ -383,74 +383,10 @@ class Overlay(QWidget):
         self._apply_normal_style()
 
 
-# ── Result History Overlay ───────────────────────────────────────────
-
-
-def parse_combined_label(label: str):
-    """Parse '血脉 + 属性' or '血脉+属性' into (bloodline, attribute_or_None)."""
-    label = label.replace("＋", "+")
-    if "+" in label:
-        parts = label.split("+", 1)
-        return parts[0].strip(), parts[1].strip()
-    return label.strip(), None
-
-
-class _ChipLabel(QLabel):
-    """Rounded chip for bloodline/attribute display."""
-    def __init__(self, text: str, bg_color: QColor, font_size: int = 14, parent=None):
-        super().__init__(text, parent)
-        r, g, b, a = bg_color.red(), bg_color.green(), bg_color.blue(), bg_color.alpha()
-        self.setStyleSheet(
-            f"QLabel {{"
-            f"  background: rgba({r},{g},{b},{a});"
-            f"  color: #111;"
-            f"  border-radius: 4px;"
-            f"  padding: 2px 8px;"
-            f"  font-size: {font_size}px;"
-            f"  font-weight: bold;"
-            f"}}"
-        )
-
-
-class _HistoryItem(QWidget):
-    """A single row: [bloodline chip] + [attribute chip]."""
-
-    def __init__(self, bloodline: str, attribute: str,
-                 bl_color: QColor, attr_color: QColor, plus_color: str,
-                 chip_font_size: int = 14, plus_font_size: int = 14,
-                 parent=None):
-        super().__init__(parent)
-        self.setObjectName("RTO_history_item")
-        self.setStyleSheet(
-            "#RTO_history_item { background: rgba(255,255,255,18); border-radius: 8px; }"
-            "#RTO_history_item:hover { background: rgba(255,255,255,32); }"
-        )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(6)
-
-        bl_chip = _ChipLabel(bloodline, bl_color, font_size=chip_font_size)
-        layout.addWidget(bl_chip)
-
-        plus = QLabel("+")
-        plus.setStyleSheet(
-            f"color: {plus_color}; font-size: {plus_font_size}px; background: transparent;")
-        layout.addWidget(plus)
-
-        if attribute:
-            attr_chip = _ChipLabel(attribute, attr_color, font_size=chip_font_size)
-            layout.addWidget(attr_chip)
-        else:
-            unknown = QLabel("?")
-            unknown.setStyleSheet(
-                f"color: #666; font-size: {chip_font_size}px; background: transparent;")
-            layout.addWidget(unknown)
-
-        layout.addStretch()
+# ── Result Overlay (screenshot preview + counter) ───────────────────
 
 
 class _RTOSignals(QObject):
-    add_result = pyqtSignal(str)
     clear_results = pyqtSignal()
     position_changed = pyqtSignal(int, int)
     size_changed = pyqtSignal(int, int)
@@ -461,7 +397,6 @@ class _RTOSignals(QObject):
     toggle_preview = pyqtSignal(bool)
     toggle_debug_overlay = pyqtSignal(bool)
     set_status_text = pyqtSignal(str)
-    screenshot_mode_changed = pyqtSignal(bool)
 
 
 def _parse_rgba(s: str) -> QColor:
@@ -474,12 +409,12 @@ def _parse_rgba(s: str) -> QColor:
 
 
 class ResultTextOverlay(QWidget):
-    """Recognition history panel with 3-zone layout.
+    """Screenshot preview panel with counter.
 
     Zones:
       HeaderBar   — title, status, action buttons
-      HistoryArea — scrollable chip-style [血脉] + [属性] items
-      CounterArea — bloodline counts | attribute counts
+      PreviewArea — sub-ROI screenshot preview
+      CounterArea — capture count
     """
 
     _HEADER_H = 42
@@ -505,7 +440,7 @@ class ResultTextOverlay(QWidget):
             "sequence_cooldown_seconds", 1.5)
         self._cooldown_until = 0.0
         self._cooldown_timer = QTimer()
-        self._cooldown_timer.setInterval(100)
+        self._cooldown_timer.setInterval(250)
         self._cooldown_timer.timeout.connect(self._update_cooldown)
 
         # Config
@@ -513,24 +448,15 @@ class ResultTextOverlay(QWidget):
         self._font_family = cfg.get("font_family", "Microsoft YaHei")
         self._header_font_size = cfg.get("header_font_size", 12)
         self._status_font_size = cfg.get("status_font_size", 11)
-        self._chip_font_size = cfg.get("chip_font_size", 14)
         self._counter_font_size = cfg.get("counter_font_size", 11)
         self._counter_title_font_size = cfg.get("counter_title_font_size", 10)
-        self._default_color = QColor(cfg.get("default_color", "#FFD700"))
-        self._label_colors: dict = cfg.get("label_colors", {})
-        self._bloodline_colors: dict = cfg.get("bloodline_colors", {})
-        self._attribute_colors: dict = cfg.get("attribute_colors", {})
-        self._plus_color = cfg.get("plus_color", "#DDDDDD")
-        self._count_color = cfg.get("count_color", "#AAAAAA")
-        self._max_items = cfg.get("max_items", 104)
         self._show_counter = cfg.get("show_counter_area", True)
-        self._counter_top_n = cfg.get("counter_top_n", 5)
 
         self._bg_color = _parse_rgba(cfg.get("background_color", "rgba(8,10,16,190)"))
         self._border_color = _parse_rgba(cfg.get("border_color", "rgba(255,255,255,45)"))
         self._border_radius = cfg.get("border_radius", 12)
         self._padding = cfg.get("padding", 10)
-        self._title_text = cfg.get("title", "识别记录")
+        self._title_text = cfg.get("title", "Roco-S2-Box")
         self._scrollbar_width = cfg.get("scrollbar_width", 7)
         self._min_w = cfg.get("min_width", 220)
         self._min_h = cfg.get("min_height", 160)
@@ -556,14 +482,10 @@ class ResultTextOverlay(QWidget):
             self._pos_x = config_x
             self._pos_y = config_y
 
-        # State — default: screenshot mode
-        self._records: list = []
-        self._history_items: list = []
-        self._bloodline_counts: dict = {}
-        self._attribute_counts: dict = {}
+        # State — always screenshot mode
+        self._records_count: int = 0
         self._dragging = False
         self._drag_start = QPoint()
-        self._status_screenshot_on = True  # start in screenshot mode
         self._mouse_locked = False
 
         self.setCursor(Qt.ArrowCursor)
@@ -573,31 +495,19 @@ class ResultTextOverlay(QWidget):
         self.move(self._pos_x, self._pos_y)
 
         # Signal wiring
-        self._signals.add_result.connect(self._do_add)
         self._signals.clear_results.connect(self._do_clear)
         self._signals.set_status_text.connect(self._do_set_status)
 
-        if self._status_screenshot_on:
-            self._status_lbl.setText("📷 截图模式")
-            self._status_lbl.setStyleSheet(
-                f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
-
         if self._enabled:
             QWidget.show(self)
-            QApplication.processEvents()  # force layout so widgets have valid sizes
+            QApplication.processEvents()
 
-        # Belt-and-suspenders: re-apply default screenshot mode after show
-        if self._status_screenshot_on:
-            self._scroll.hide()
-            self._screenshot_preview.show()
-            self._mode_btn.setText("📷 截图模式")
-            self._mode_btn.setStyleSheet(
-                "QPushButton { color: #44dd88; background: rgba(68,221,136,12); "
-                "border: 1px solid rgba(68,221,136,40); border-radius: 6px; "
-                "font-size: 15px; padding: 4px 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(68,221,136,25); "
-                "border-color: rgba(68,221,136,80); }")
-            self._refresh_screenshot_counter()
+        self._status_lbl.setText("📷 截图模式")
+        self._status_lbl.setStyleSheet(
+            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
+        self._scroll.hide()
+        self._screenshot_preview.show()
+        self._refresh_screenshot_counter()
 
     # ── build ─────────────────────────────────────────────────────────
 
@@ -690,19 +600,6 @@ class ResultTextOverlay(QWidget):
             "border-radius: 4px; }")
         quit_btn.clicked.connect(lambda: self._signals.request_quit.emit())
         hl.addWidget(quit_btn)
-
-        # Mode toggle (larger, prominent)
-        self._mode_btn = QPushButton("🔍 识图模式")
-        self._mode_btn.setMinimumHeight(36)
-        self._mode_btn.setToolTip("切换识图/截图模式")
-        self._mode_btn.clicked.connect(self._toggle_screenshot_mode)
-        self._mode_btn.setStyleSheet(
-            "QPushButton { color: #66aaff; background: rgba(102,170,255,12); "
-            "border: 1px solid rgba(102,170,255,40); border-radius: 6px; "
-            "font-size: 15px; padding: 4px 12px; font-weight: bold; }"
-            "QPushButton:hover { background: rgba(102,170,255,25); "
-            "border-color: rgba(102,170,255,80); }")
-        hl.addWidget(self._mode_btn)
 
         panel_layout.addWidget(self._header_bar)
 
@@ -814,19 +711,6 @@ class ResultTextOverlay(QWidget):
         self._scroll.setStyleSheet(self._scroll_style())
         self._header_bar.setStyleSheet(self._header_style())
         self._counter_area.setStyleSheet(self._counter_style())
-
-        # If starting in screenshot mode, apply initial state now
-        if self._status_screenshot_on:
-            self._scroll.hide()
-            self._screenshot_preview.show()
-            self._mode_btn.setText("📷 截图模式")
-            self._mode_btn.setStyleSheet(
-                "QPushButton { color: #44dd88; background: rgba(68,221,136,12); "
-                "border: 1px solid rgba(68,221,136,40); border-radius: 6px; "
-                "font-size: 15px; padding: 4px 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(68,221,136,25); "
-                "border-color: rgba(68,221,136,80); }")
-            self._refresh_screenshot_counter()
 
         self._panel.repaint()
 
@@ -985,37 +869,9 @@ class ResultTextOverlay(QWidget):
             "border-radius: 4px; }")
         self._signals.toggle_debug_overlay.emit(self._status_overlay_on)
 
-    def _toggle_screenshot_mode(self):
-        self._status_screenshot_on = not self._status_screenshot_on
-        self._signals.screenshot_mode_changed.emit(self._status_screenshot_on)
-        if self._status_screenshot_on:
-            self._mode_btn.setText("📷 截图模式")
-            self._mode_btn.setStyleSheet(
-                "QPushButton { color: #44dd88; background: rgba(68,221,136,12); "
-                "border: 1px solid rgba(68,221,136,40); border-radius: 6px; "
-                "font-size: 15px; padding: 4px 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(68,221,136,25); "
-                "border-color: rgba(68,221,136,80); }")
-            # Swap: hide history, show screenshot preview
-            self._scroll.hide()
-            self._screenshot_preview.show()
-            self._refresh_screenshot_counter()
-        else:
-            self._mode_btn.setText("🔍 识图模式")
-            self._mode_btn.setStyleSheet(
-                "QPushButton { color: #66aaff; background: rgba(102,170,255,12); "
-                "border: 1px solid rgba(102,170,255,40); border-radius: 6px; "
-                "font-size: 15px; padding: 4px 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(102,170,255,25); "
-                "border-color: rgba(102,170,255,80); }")
-            # Swap: show history, hide screenshot preview
-            self._scroll.show()
-            self._screenshot_preview.hide()
-            self._refresh_counter_area()
-
     def _refresh_screenshot_counter(self):
-        """Show simplified counter: total box count on one line."""
-        total = len(self._records)
+        """Show simplified counter: total box count."""
+        total = self._records_count
         if total > 0:
             self._bl_counter.setText(
                 f"<html><body style='margin:0;padding:0'>"
@@ -1093,42 +949,24 @@ class ResultTextOverlay(QWidget):
 
     def show_sampling(self):
         self._start_cooldown()
-        if self._status_screenshot_on:
-            self._status_lbl.setText("📷 截图模式")
-            self._status_lbl.setStyleSheet(
-                f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
-            return
-        self.set_status_text("正在采样识别...")
+        self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #66aaff; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
 
-    def show_match(self, text: str):
+    def show_match(self, text: str = ""):
         self._start_cooldown()
-        if self._status_screenshot_on:
-            self._status_lbl.setText("📷 截图模式")
-            self._status_lbl.setStyleSheet(
-                f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
-            return
-        self.set_status_text(f"识别到：{text}")
+        self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #00954f; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
 
     def show_no_match(self):
         self._start_cooldown()
-        if self._status_screenshot_on:
-            dummy_label = f"screenshot_{len(self._records)}"
-            self._records.append(dummy_label)
-            if len(self._records) > self._max_items:
-                self._records.pop(0)
-            self._refresh_screenshot_counter()
-            self._status_lbl.setText("📷 截图模式")
-            self._status_lbl.setStyleSheet(
-                f"color: #44dd88; font-size: {self._status_font_size}px; "
-                "background: transparent;")
-            return
-        self.set_status_text("未识别到目标")
+        self._records_count += 1
+        self._refresh_screenshot_counter()
+        self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #aaa; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_size}px; "
+            "background: transparent;")
 
     def _start_cooldown(self):
         self._cooldown_until = time.time() + self._cooldown_duration
@@ -1148,107 +986,18 @@ class ResultTextOverlay(QWidget):
     def _do_set_status(self, text: str):
         self._status_lbl.setText(text)
 
-    def _do_add(self, label: str):
-        # Screenshot mode: counting handled by update_screenshot_preview
-        if self._status_screenshot_on:
-            return
-
-        bloodline, attribute = parse_combined_label(label)
-
-        self._records.append(label)
-        if len(self._records) > self._max_items:
-            self._records.pop(0)
-            if self._history_items:
-                w = self._history_items.pop(0)
-                self._content_layout.removeWidget(w)
-                w.deleteLater()
-
-        # Update counts
-        self._bloodline_counts[bloodline] = self._bloodline_counts.get(bloodline, 0) + 1
-        if attribute:
-            self._attribute_counts[attribute] = self._attribute_counts.get(attribute, 0) + 1
-
-        bl_color = self._resolve_color(bloodline, is_bloodline=True)
-        attr_color = self._resolve_color(attribute, is_bloodline=False) if attribute else self._default_color
-
-        item = _HistoryItem(bloodline, attribute, bl_color, attr_color,
-                           self._plus_color, self._chip_font_size, self._chip_font_size)
-        self._history_items.append(item)
-        self._content_layout.insertWidget(
-            self._content_layout.count() - 1, item)
-
-        self._refresh_counter_area()
-        QWidget.show(self)
-        QTimer.singleShot(20, self._scroll_to_bottom)
+    def add_result(self, label: str) -> None:
+        """No-op — screenshot mode only, counting handled by show_no_match."""
+        pass
 
     def _do_clear(self):
-        self._records.clear()
-        for w in self._history_items:
-            self._content_layout.removeWidget(w)
-            w.deleteLater()
-        self._history_items.clear()
-        self._bloodline_counts.clear()
-        self._attribute_counts.clear()
-        if self._status_screenshot_on:
-            self._refresh_screenshot_counter()
-        else:
-            self._refresh_counter_area()
+        self._records_count = 0
+        self._refresh_screenshot_counter()
 
     # ── counter ───────────────────────────────────────────────────────
 
     def _refresh_counter_area(self):
-        if self._status_screenshot_on:
-            self._refresh_screenshot_counter()
-            return
-        if not self._show_counter:
-            return
-
-        top_n = self._counter_top_n
-
-        # Bloodline column
-        bl_sorted = sorted(
-            self._bloodline_counts.items(), key=lambda x: -x[1])[:top_n]
-        if bl_sorted:
-            bl_rows = [f"<span style='color:#aaa;font-size:{self._counter_title_font_size}px;'>血脉统计</span>"]
-            for name, cnt in bl_sorted:
-                c = self._resolve_color(name, is_bloodline=True)
-                bl_rows.append(
-                    f"<span style='color:{c.name()}'>{name}</span>"
-                    f"<span style='color:{self._count_color}'> ×{cnt}</span>")
-            self._bl_counter.setText(
-                "<html><body style='margin:0;padding:0'>"
-                + "<br>".join(bl_rows) + "</body></html>")
-        else:
-            self._bl_counter.setText("")
-
-        # Attribute column
-        attr_sorted = sorted(
-            self._attribute_counts.items(), key=lambda x: -x[1])[:top_n]
-        if attr_sorted:
-            attr_rows = [f"<span style='color:#aaa;font-size:{self._counter_title_font_size}px;'>属性统计</span>"]
-            for name, cnt in attr_sorted:
-                c = self._resolve_color(name, is_bloodline=False)
-                attr_rows.append(
-                    f"<span style='color:{c.name()}'>{name}</span>"
-                    f"<span style='color:{self._count_color}'> ×{cnt}</span>")
-            self._attr_counter.setText(
-                "<html><body style='margin:0;padding:0'>"
-                + "<br>".join(attr_rows) + "</body></html>")
-        else:
-            self._attr_counter.setText("")
-
-    # ── color resolution ──────────────────────────────────────────────
-
-    def _resolve_color(self, label: str, is_bloodline: bool = True) -> QColor:
-        if not label:
-            return self._default_color
-        key = "bloodline_colors" if is_bloodline else "attribute_colors"
-        colors = self.config.get("result_text_overlay", {}).get(key, {})
-        if label in colors:
-            return QColor(colors[label])
-        if label in self._label_colors:
-            return QColor(self._label_colors[label])
-        return self._default_color
+        self._refresh_screenshot_counter()
 
     # ── drag (on header bar only) ─────────────────────────────────────
 
@@ -1341,18 +1090,9 @@ class ResultTextOverlay(QWidget):
         self._font_family = cfg.get("font_family", self._font_family)
         self._header_font_size = cfg.get("header_font_size", self._header_font_size)
         self._status_font_size = cfg.get("status_font_size", self._status_font_size)
-        self._chip_font_size = cfg.get("chip_font_size", self._chip_font_size)
         self._counter_font_size = cfg.get("counter_font_size", self._counter_font_size)
         self._counter_title_font_size = cfg.get("counter_title_font_size", self._counter_title_font_size)
-        self._default_color = QColor(cfg.get("default_color", self._default_color.name()))
-        self._label_colors = cfg.get("label_colors", self._label_colors)
-        self._bloodline_colors = cfg.get("bloodline_colors", self._bloodline_colors)
-        self._attribute_colors = cfg.get("attribute_colors", self._attribute_colors)
-        self._plus_color = cfg.get("plus_color", self._plus_color)
-        self._count_color = cfg.get("count_color", self._count_color)
-        self._max_items = cfg.get("max_items", self._max_items)
         self._show_counter = cfg.get("show_counter_area", self._show_counter)
-        self._counter_top_n = cfg.get("counter_top_n", self._counter_top_n)
         self._cooldown_duration = self.config.get("runtime", {}).get(
             "sequence_cooldown_seconds", self._cooldown_duration)
         self._bg_color = _parse_rgba(cfg.get("background_color",
@@ -1391,23 +1131,7 @@ class ResultTextOverlay(QWidget):
             self._counter_area.show()
         else:
             self._counter_area.hide()
-        # Rebuild all history items with new color config
-        old_items = self._history_items[:]
-        self._history_items.clear()
-        for rec_label in self._records:
-            bloodline, attribute = parse_combined_label(rec_label)
-            bl_color = self._resolve_color(bloodline, is_bloodline=True)
-            attr_color = self._resolve_color(attribute, is_bloodline=False) if attribute else self._default_color
-            new_item = _HistoryItem(bloodline, attribute, bl_color, attr_color,
-                                   self._plus_color, self._chip_font_size,
-                                   self._chip_font_size)
-            self._history_items.append(new_item)
-            self._content_layout.insertWidget(
-                self._content_layout.count() - 1, new_item)
-        for w in old_items:
-            self._content_layout.removeWidget(w)
-            w.deleteLater()
-        self._refresh_counter_area()
+        self._refresh_screenshot_counter()
 
 
 # ── Debug Box Overlay ──────────────────────────────────────────────────
