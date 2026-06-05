@@ -275,6 +275,7 @@ class CascadeDetector(threading.Thread):
         self._gate_open_time = 0.0
         self._capture_offsets = [2.0, 2.5, 3.0]
         self._capture_offset_idx = 0
+        self._scheduled_frames: list = []  # (offset, roi_image) pairs
         self._icon_status_text = ""
 
         self._load_all_config(config)
@@ -635,96 +636,135 @@ class CascadeDetector(threading.Thread):
     # ── scheduled capture (icon mode gate open) ──────────────────────
 
     def _handle_idle_scheduled(self, now: float) -> Optional[CascadeDetectionResult]:
-        """Gate open: capture at predefined offsets, run anchor matching on each."""
+        """Phase 1: capture frames at each offset (no matching yet).
+        Phase 2: run anchor matching on all captured frames, pick best."""
+        # ── Phase 2: all captures done, run matching ──
         if self._capture_offset_idx >= len(self._capture_offsets):
-            # All offsets exhausted, no anchor found — enter cooldown
-            print(f"[IconState] IDLE_SCHEDULED → COOLDOWN (all offsets exhausted)")
+            return self._finalize_scheduled(now)
+
+        # ── Phase 1: capture at next offset ──
+        next_offset = self._capture_offsets[self._capture_offset_idx]
+        elapsed = now - self._gate_open_time
+        if elapsed < next_offset:
+            self._dbg_status_text = (f"capture in {next_offset - elapsed:.1f}s "
+                                     f"({self._capture_offset_idx + 1}/"
+                                     f"{len(self._capture_offsets)})")
+            self._show_live_preview()
+            return None
+
+        self._capture_offset_idx += 1
+        capture = self._capture_roi()
+        if capture is not None:
+            self._scheduled_frames.append((next_offset, capture.copy()))
+            self._dbg_roi = capture
+            print(f"[IconState] captured +{next_offset:.2f}s "
+                  f"({self._capture_offset_idx}/{len(self._capture_offsets)})")
+
+        # Check if all captured
+        if self._capture_offset_idx >= len(self._capture_offsets):
+            print(f"[IconState] all {len(self._scheduled_frames)} frames captured, "
+                  f"starting matching phase...")
+            self._dbg_status_text = "matching..."
+            self._show_live_preview()
+            return None
+
+        return None
+
+    def _finalize_scheduled(self, now: float) -> Optional[CascadeDetectionResult]:
+        """Run anchor matching on all captured frames, pick the best match."""
+        frames = self._scheduled_frames
+        self._scheduled_frames = []
+
+        if not frames:
+            print(f"[IconState] IDLE_SCHEDULED → COOLDOWN (no frames captured)")
             self._sampling_state = "cooldown"
             self._cooldown_until = now + self._cooldown_seconds
             self._seq_triggered = True
             self._dbg_status_text = ""
             return None
 
-        next_offset = self._capture_offsets[self._capture_offset_idx]
-        elapsed = now - self._gate_open_time
-        if elapsed < next_offset:
-            self._dbg_status_text = (f"next anchor match in "
-                                     f"{next_offset - elapsed:.1f}s")
-            self._show_live_preview()
-            return None
-
-        # Time to capture and run anchor matching
-        self._capture_offset_idx += 1
-        print(f"[IconState] scheduled capture at +{next_offset:.1f}s "
-              f"({self._capture_offset_idx}/{len(self._capture_offsets)})")
-
-        capture = self._capture_roi()
-        if capture is None:
-            return None
-        self._dbg_roi = capture
-
-        h, w = capture.shape[:2]
-        scale_factor = 1.0
-        if self._norm_width > 0 and w > 0:
-            scale_factor = self._norm_width / w
-            normalized = resize_by_width(capture, self._norm_width)
-        else:
-            normalized = capture
-
         anchor_group = self.cache.get_anchor_templates()
         if anchor_group is None or not anchor_group.items:
+            self._sampling_state = "cooldown"
+            self._cooldown_until = now + self._cooldown_seconds
+            self._seq_triggered = True
             return None
 
-        anchor_image = preprocess_image(
-            normalized,
-            use_grayscale=anchor_group.use_grayscale,
-            preprocess_mode=anchor_group.preprocess_mode,
-            gamma=anchor_group.gamma,
-        )
+        best_offset = 0.0
+        best_score = -1.0
+        best_box = None
+        best_frame = None
 
-        coarse_th = self.config["anchor"].get("coarse_threshold", 0)
-        early_exit = self.config["anchor"].get("early_exit_score", 0.9)
-        anchor_result = match_templates_multiscale(
-            anchor_image, anchor_group.items,
-            anchor_group.threshold,
-            anchor_group.scale_min * scale_factor,
-            anchor_group.scale_max * scale_factor,
-            anchor_group.scale_steps,
-            anchor_group.use_grayscale,
-            label="anchor",
-            coarse_threshold=coarse_th if coarse_th > 0 else None,
-            early_exit_score=early_exit,
-        )
+        for offset, roi_img in frames:
+            h, w = roi_img.shape[:2]
+            scale_factor = 1.0
+            if self._norm_width > 0 and w > 0:
+                scale_factor = self._norm_width / w
+                normalized = resize_by_width(roi_img, self._norm_width)
+            else:
+                normalized = roi_img
 
-        # ── debug save: scheduled capture frame ──
-        if self._debug_save_enabled():
-            self._save_scheduled_frame(capture, anchor_result, scale_factor,
-                                       next_offset)
+            anchor_image = preprocess_image(
+                normalized,
+                use_grayscale=anchor_group.use_grayscale,
+                preprocess_mode=anchor_group.preprocess_mode,
+                gamma=anchor_group.gamma,
+            )
 
-        if anchor_result.matched and anchor_result.box is not None:
-            anchor_box = scale_box(anchor_result.box, 1.0 / scale_factor)
-            print(f"[IconState] anchor FOUND at +{next_offset:.1f}s "
-                  f"score={anchor_result.score:.2f}")
-            self._start_sampling(capture, anchor_box, now)
-            self._dbg_anchor_box = anchor_box
+            coarse_th = self.config["anchor"].get("coarse_threshold", 0)
+            early_exit = self.config["anchor"].get("early_exit_score", 0.9)
+            result = match_templates_multiscale(
+                anchor_image, anchor_group.items,
+                anchor_group.threshold,
+                anchor_group.scale_min * scale_factor,
+                anchor_group.scale_max * scale_factor,
+                anchor_group.scale_steps,
+                anchor_group.use_grayscale,
+                label="anchor",
+                coarse_threshold=coarse_th if coarse_th > 0 else None,
+                early_exit_score=early_exit,
+            )
+
+            # Debug save
+            if self._debug_save_enabled():
+                self._save_scheduled_frame(roi_img, result, scale_factor, offset)
+
+            matched = result.matched and result.box is not None
+            print(f"[IconState] +{offset:.2f}s: score={result.score:.3f} "
+                  f"{'MATCH' if matched else 'no match'}")
+
+            if matched and result.score > best_score:
+                best_score = result.score
+                best_box = scale_box(result.box, 1.0 / scale_factor)
+                best_frame = roi_img
+                best_offset = offset
+
+        if best_box is not None and best_frame is not None:
+            print(f"[IconState] BEST match at +{best_offset:.2f}s "
+                  f"score={best_score:.3f} → capturing sub-ROIs")
+            self._start_sampling(best_frame, best_box, now)
+            self._dbg_anchor_box = best_box
             return CascadeDetectionResult(
                 matched=False, label=None,
-                anchor_result=anchor_result,
+                anchor_result=MatchResult(
+                    stage="anchor", label="anchor", matched=True,
+                    score=best_score, box=best_box,
+                    template_path=None, scale=None,
+                ),
                 sub_roi_box=self._locked_sub_roi,
-                anchor_box=anchor_box,
+                anchor_box=best_box,
                 sub_roi_box_2=self._locked_sub_roi_2,
-                debug_frame=None,
                 status="sampling",
                 sub_roi1_image=self._latest_sub_roi1,
                 sub_roi2_image=self._latest_sub_roi2,
             )
 
-        # No match at this offset, try next
-        print(f"[IconState] anchor NOT found at +{next_offset:.1f}s "
-              f"(best={anchor_result.score:.2f})")
-        self._dbg_status_text = (f"anchor miss at +{next_offset:.1f}s "
-                                 f"score={anchor_result.score:.2f}")
-        self._show_live_preview()
+        print(f"[IconState] IDLE_SCHEDULED → COOLDOWN "
+              f"(no match in {len(frames)} frames, best={best_score:.3f})")
+        self._sampling_state = "cooldown"
+        self._cooldown_until = now + self._cooldown_seconds
+        self._seq_triggered = True
+        self._dbg_status_text = ""
         return None
 
     # ── per-frame logic ──────────────────────────────────────────────
@@ -928,18 +968,17 @@ class CascadeDetector(threading.Thread):
             thumb = self._dbg_icon_thumbnail
             th, tw = thumb.shape[:2]
             margin = 4
-            ix = debug.shape[1] - tw - margin
-            iy = 28  # below status bar
-            # Border: green if icon present, red if not
-            border_color = (0, 220, 0) if self._dbg_icon_present else (0, 0, 220)
-            cv2.rectangle(debug, (ix - 2, iy - 2), (ix + tw + 2, iy + th + 2),
-                          border_color, 2)
-            # Paste thumbnail
-            debug[iy:iy + th, ix:ix + tw] = thumb
-            # Score label
-            cv2.putText(debug, f"icon {self._dbg_icon_score:.2f}",
-                        (ix, iy - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.35, border_color, 1)
+            ix = max(0, debug.shape[1] - tw - margin)
+            iy = 28
+            # Only draw if debug image is large enough
+            if iy + th <= debug.shape[0] and ix + tw <= debug.shape[1]:
+                border_color = (0, 220, 0) if self._dbg_icon_present else (0, 0, 220)
+                cv2.rectangle(debug, (ix - 2, iy - 2), (ix + tw + 2, iy + th + 2),
+                              border_color, 2)
+                debug[iy:iy + th, ix:ix + tw] = thumb
+                cv2.putText(debug, f"icon {self._dbg_icon_score:.2f}",
+                            (ix, iy - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35, border_color, 1)
 
         bar_h = 26
         cv2.rectangle(debug, (0, 0), (debug.shape[1], bar_h), (0, 0, 0), -1)

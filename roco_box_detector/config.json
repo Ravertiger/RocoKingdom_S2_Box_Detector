@@ -20,9 +20,9 @@
       "templates/box_anchor/d2b95767-7a0f-429f-a9b7-2e154079eb02.png",
       "templates/box_anchor/54f52dfdb7a516811b8c9fe315c8440d.png"
     ],
-    "threshold": 0.75,
-    "scale_min": 0.75,
-    "scale_max": 0.9,
+    "threshold": 0.85,
+    "scale_min": 0.9,
+    "scale_max": 1.25,
     "scale_steps": 5,
     "use_grayscale": true,
     "preprocess_mode": "gamma",
@@ -48,7 +48,7 @@
     "sample_interval_seconds": 0.01,
     "max_frames": 1
   },
-  "game_resolution": "1080p",
+  "game_resolution": "2K",
   "runtime": {
     "normalize_roi_width": 250,
     "anchor_skip_frames": 1,
@@ -57,8 +57,8 @@
   },
   "debug": {
     "enabled": false,
-    "show_preview_window": true,
-    "save_debug_frames": true,
+    "show_preview_window": false,
+    "save_debug_frames": false,
     "save_every_n_seconds": 3,
     "debug_output_dir": "debug_output",
     "draw_anchor_box": true,
@@ -79,10 +79,10 @@
   },
   "result_text_overlay": {
     "enabled": true,
-    "x": 3524,
-    "y": 632,
+    "x": 2937,
+    "y": 233,
     "width": 858,
-    "height": 408,
+    "height": 420,
     "min_width": 220,
     "min_height": 160,
     "font_family": "微软雅黑",
@@ -95,7 +95,7 @@
     "border_color": "rgba(255,255,255,45)",
     "border_radius": 20,
     "padding": 10,
-    "title": "Roco-S2-Box-2.3.0",
+    "title": "Roco-S2-Box-2.4.0",
     "scrollbar_width": 8,
     "counter_top_n": 20,
     "show_counter_area": true,
@@ -121,16 +121,16 @@
     "disappear_delay_seconds": 0.5,
     "debounce_frames": 3,
     "capture_offsets": [
-      0.91,
-      0.94,
-      0.97,
-      1.0
+      0.95,
+      1.0,
+      1.05,
+      1.1
     ],
     "icon_roi": {
-      "left": 1799,
-      "top": 262,
-      "width": 96,
-      "height": 34
+      "left": 2235,
+      "top": 54,
+      "width": 139,
+      "height": 42
     }
   },
   "startup_complete": true,
