@@ -2,7 +2,6 @@
 
 - 本小软件由Deepseek+CC+Chatgpt+Gemini联合制作，我负责提供想法，提供数据集和校准参数
 - 相信你们S2赛季抓异色的时候总会走神忘记看盒子上的精灵属性，特别是狼熊梨之类单抓可回本的精灵，因此在基本没有编程基础的背景下，我和AI军团搏斗了5天写出来了这个小软件
-- 百度网盘：https://pan.baidu.com/s/1NY10_OyjNJrODca9UDwtRg?pwd=dfes 提取码: dfes 
 
 夸克网盘：/~dfe53YuOGY~:/
 链接：https://pan.quark.cn/s/fef9e0a153e6
