@@ -1,6 +1,7 @@
 """Debug visualization: draw boxes, save debug images, throttled logging."""
 
 import cv2
+import numpy as np
 import os
 import time
 from datetime import datetime
@@ -28,6 +29,7 @@ class DebugDrawer:
         anchor_box: Optional[Tuple[int, int, int, int]] = None,
         sub_roi_box: Optional[Tuple[int, int, int, int]] = None,
         sub_roi_box_2: Optional[Tuple[int, int, int, int]] = None,
+        icon_roi_box: Optional[Tuple[int, int, int, int]] = None,
         anchor_score: float = 0.0,
     ) -> np.ndarray:
         """Draw detection boxes on a debug copy of the frame."""
@@ -54,7 +56,38 @@ class DebugDrawer:
             cv2.putText(debug, "ROI2", (x, y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
 
+        if icon_roi_box is not None:
+            x, y, w, h = icon_roi_box
+            cv2.rectangle(debug, (x, y), (x + w, y + h), (255, 0, 255), 1)
+            cv2.putText(debug, "ICON ROI", (x, max(12, y - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 0, 255), 1)
+
+        # Calibration overlay: real-time coordinates for quick ratio tuning.
+        lines = [
+            f"A  {self._fmt_box(anchor_box)}  s={anchor_score:.2f}",
+            f"R1 {self._fmt_box(sub_roi_box)}",
+            f"R2 {self._fmt_box(sub_roi_box_2)}",
+            f"IC {self._fmt_box(icon_roi_box)}",
+        ]
+        panel_h = 18 * len(lines) + 8
+        panel_w = 390
+        y0 = max(0, debug.shape[0] - panel_h - 6)
+        cv2.rectangle(debug, (6, y0),
+                      (min(debug.shape[1] - 6, 6 + panel_w), y0 + panel_h),
+                      (0, 0, 0), -1)
+        for i, line in enumerate(lines):
+            y = y0 + 18 + i * 18
+            cv2.putText(debug, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, (220, 220, 220), 1)
+
         return debug
+
+    @staticmethod
+    def _fmt_box(box: Optional[Tuple[int, int, int, int]]) -> str:
+        if box is None:
+            return "-"
+        x, y, w, h = box
+        return f"x={x} y={y} w={w} h={h}"
 
     def maybe_save(self, frame: np.ndarray, tag: str = "") -> None:
         """Save debug frame, throttled by save_interval."""

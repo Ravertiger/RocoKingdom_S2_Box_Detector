@@ -65,6 +65,16 @@ class ROISelector:
         # Fallback: primary monitor
         return monitors[0] if monitors else (0, 0, 1920, 1080)
 
+    @staticmethod
+    def _get_cursor_pos():
+        """Return current cursor absolute screen position in physical pixels."""
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        pt = POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return int(pt.x), int(pt.y)
+
     def select(self, message: str = "拖拽鼠标框选区域") -> Optional[dict]:
         """Open an overlay on the monitor under the cursor. Returns ROI dict or None."""
         self._roi = None
@@ -95,31 +105,40 @@ class ROISelector:
             justify=tk.CENTER,
         )
 
-        def on_button_press(event):
-            self._start_x = event.x
-            self._start_y = event.y
+        def on_button_press(_event):
+            # Use raw Win32 absolute coordinates to avoid Tk logical-coordinate
+            # scaling drift under custom DPI settings.
+            abs_x, abs_y = self._get_cursor_pos()
+            self._start_x = abs_x
+            self._start_y = abs_y
             if self._rect_id is not None:
                 canvas.delete(self._rect_id)
 
-        def on_move(event):
+        def on_move(_event):
+            abs_x, abs_y = self._get_cursor_pos()
             if self._rect_id is not None:
                 canvas.delete(self._rect_id)
+            x1 = self._start_x - screen_left
+            y1 = self._start_y - screen_top
+            x2 = abs_x - screen_left
+            y2 = abs_y - screen_top
             self._rect_id = canvas.create_rectangle(
-                self._start_x, self._start_y, event.x, event.y,
+                x1, y1, x2, y2,
                 outline="#00FF00", width=2)
 
-        def on_button_release(event):
-            x1 = min(self._start_x, event.x)
-            y1 = min(self._start_y, event.y)
-            x2 = max(self._start_x, event.x)
-            y2 = max(self._start_y, event.y)
+        def on_button_release(_event):
+            abs_x, abs_y = self._get_cursor_pos()
+            x1 = min(self._start_x, abs_x)
+            y1 = min(self._start_y, abs_y)
+            x2 = max(self._start_x, abs_x)
+            y2 = max(self._start_y, abs_y)
             w = x2 - x1
             h = y2 - y1
             if w > 10 and h > 10:
-                # Map window-relative coords to absolute screen coords
+                # Absolute ROI in physical pixels, aligned with mss.grab monitor dict.
                 self._roi = {
-                    "left": screen_left + x1,
-                    "top": screen_top + y1,
+                    "left": x1,
+                    "top": y1,
                     "width": w,
                     "height": h,
                 }

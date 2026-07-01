@@ -417,7 +417,7 @@ class ResultTextOverlay(QWidget):
       CounterArea — capture count
     """
 
-    _HEADER_H = 42
+    _BASE_HEADER_H = 42
 
     def __init__(self, config: dict):
         super().__init__()
@@ -445,6 +445,8 @@ class ResultTextOverlay(QWidget):
 
         # Config
         self._enabled = cfg.get("enabled", True)
+        self._ui_scale = float(cfg.get("ui_scale", 0.85))
+        self._ui_scale = max(0.65, min(1.2, self._ui_scale))
         self._font_family = cfg.get("font_family", "Microsoft YaHei")
         self._header_font_size = cfg.get("header_font_size", 12)
         self._status_font_size = cfg.get("status_font_size", 11)
@@ -458,19 +460,26 @@ class ResultTextOverlay(QWidget):
         self._padding = cfg.get("padding", 10)
         self._title_text = cfg.get("title", "Roco-S2-Box")
         self._scrollbar_width = cfg.get("scrollbar_width", 7)
-        self._min_w = cfg.get("min_width", 220)
-        self._min_h = cfg.get("min_height", 160)
+        self._min_w = max(180, self._scaled_px(cfg.get("min_width", 220)))
+        self._min_h = max(110, self._scaled_px(cfg.get("min_height", 140)))
+        self._header_h = self._scaled_px(self._BASE_HEADER_H)
+        self._header_font_px = max(10, self._scaled_px(self._header_font_size))
+        self._status_font_px = max(9, self._scaled_px(self._status_font_size))
+        self._counter_font_px = max(9, self._scaled_px(self._counter_font_size))
+        self._counter_title_font_px = max(8, self._scaled_px(self._counter_title_font_size))
+        self._padding_px = max(4, self._scaled_px(self._padding))
+        self._button_font_px = max(10, self._scaled_px(14))
 
         # Position / size — defaults on primary screen, validates across all screens
         screen = QApplication.primaryScreen()
         geom = screen.geometry() if screen else None
         if geom:
-            def_w = max(220, geom.width() // 4)
-            def_h = 240
+            def_w = max(self._min_w, geom.width() // 4)
+            def_h = max(self._min_h, self._scaled_px(230))
             def_x = max(0, (geom.width() - def_w) // 2)
             def_y = max(0, geom.height() - def_h - 30)
         else:
-            def_w, def_h, def_x, def_y = 360, 240, 800, 500
+            def_w, def_h, def_x, def_y = max(self._min_w, 360), max(self._min_h, 230), 800, 500
         self._width = cfg.get("width", def_w)
         self._height = cfg.get("height", def_h)
         config_x = cfg.get("x", def_x)
@@ -504,10 +513,13 @@ class ResultTextOverlay(QWidget):
 
         self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_px}px; background: transparent;")
         self._scroll.hide()
         self._screenshot_preview.show()
         self._refresh_screenshot_counter()
+
+    def _scaled_px(self, px: int) -> int:
+        return max(1, int(round(px * self._ui_scale)))
 
     # ── build ─────────────────────────────────────────────────────────
 
@@ -534,26 +546,27 @@ class ResultTextOverlay(QWidget):
         # ── header bar ──
         self._header_bar = QWidget()
         self._header_bar.setObjectName("RTO_header")
-        self._header_bar.setFixedHeight(self._HEADER_H)
+        self._header_bar.setFixedHeight(self._header_h)
         hl = QHBoxLayout(self._header_bar)
-        hl.setContentsMargins(self._padding, 4, self._padding, 2)
+        hl.setContentsMargins(self._padding_px, 4, self._padding_px, 2)
         hl.setSpacing(4)
 
         self._title_lbl = QLabel(self._title_text)
         self._title_lbl.setStyleSheet(
-            f"color: #ccc; font-size: {self._header_font_size}px; "
+            f"color: #ccc; font-size: {self._header_font_px}px; "
             "background: transparent; font-weight: bold;")
         hl.addWidget(self._title_lbl)
 
         self._status_lbl = QLabel("● 运行中")
         self._status_lbl.setStyleSheet(
-            f"color: #aaa; font-size: {self._status_font_size}px; "
+            f"color: #aaa; font-size: {self._status_font_px}px; "
             "background: transparent;")
         hl.addWidget(self._status_lbl)
 
         self._lock_lbl = QLabel("")
         self._lock_lbl.setStyleSheet(
-            "color: #e04040; font-size: 11px; background: transparent; font-weight: bold;")
+            f"color: #e04040; font-size: {max(9, self._scaled_px(11))}px; "
+            "background: transparent; font-weight: bold;")
         hl.addWidget(self._lock_lbl)
 
         hl.addStretch()
@@ -595,7 +608,7 @@ class ResultTextOverlay(QWidget):
         quit_btn = self._make_header_btn("⏻ 退出", "退出程序")
         quit_btn.setStyleSheet(
             "QPushButton { color: #e04040; background: transparent; border: none; "
-            "font-size: 14px; padding: 2px 6px; }"
+            f"font-size: {self._button_font_px}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #ff6666; background: rgba(255,64,64,30); "
             "border-radius: 4px; }")
         quit_btn.clicked.connect(lambda: self._signals.request_quit.emit())
@@ -613,7 +626,7 @@ class ResultTextOverlay(QWidget):
         self._content = QWidget()
         self._content.setObjectName("RTO_content")
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(self._padding, 6, self._padding, 4)
+        self._content_layout.setContentsMargins(self._padding_px, 6, self._padding_px, 4)
         self._content_layout.setSpacing(4)
         self._content_layout.addStretch()
         self._scroll.setWidget(self._content)
@@ -635,7 +648,7 @@ class ResultTextOverlay(QWidget):
         self._ss_img1.setStyleSheet(
             "color: #666; font-size: 10px; background: rgba(0,0,0,60); "
             "border-radius: 4px; padding: 4px;")
-        self._ss_img1.setMinimumSize(160, 100)
+        self._ss_img1.setMinimumSize(self._scaled_px(128), self._scaled_px(74))
         ss_row.addWidget(self._ss_img1, 1)
 
         self._ss_img2 = QLabel("")
@@ -643,7 +656,7 @@ class ResultTextOverlay(QWidget):
         self._ss_img2.setStyleSheet(
             "color: #666; font-size: 10px; background: rgba(0,0,0,60); "
             "border-radius: 4px; padding: 4px;")
-        self._ss_img2.setMinimumSize(160, 100)
+        self._ss_img2.setMinimumSize(self._scaled_px(128), self._scaled_px(74))
         ss_row.addWidget(self._ss_img2, 1)
 
         ss_layout.addLayout(ss_row)
@@ -654,13 +667,13 @@ class ResultTextOverlay(QWidget):
         self._counter_area = QWidget()
         self._counter_area.setObjectName("RTO_counter")
         counter_layout = QHBoxLayout(self._counter_area)
-        counter_layout.setContentsMargins(self._padding, 6, self._padding, 6)
+        counter_layout.setContentsMargins(self._padding_px, 6, self._padding_px, 6)
         counter_layout.setSpacing(12)
 
         self._bl_counter = QLabel("")
         self._bl_counter.setObjectName("RTO_bl_counter")
         self._bl_counter.setStyleSheet(
-            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_px}px; background: transparent;")
         self._bl_counter.setWordWrap(True)
         self._bl_counter.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         counter_layout.addWidget(self._bl_counter, 1)
@@ -668,7 +681,7 @@ class ResultTextOverlay(QWidget):
         self._attr_counter = QLabel("")
         self._attr_counter.setObjectName("RTO_attr_counter")
         self._attr_counter.setStyleSheet(
-            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_px}px; background: transparent;")
         self._attr_counter.setWordWrap(True)
         self._attr_counter.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         counter_layout.addWidget(self._attr_counter, 1)
@@ -678,18 +691,18 @@ class ResultTextOverlay(QWidget):
         self._cooldown_label.setObjectName("RTO_cooldown")
         self._cooldown_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._cooldown_label.setStyleSheet(
-            f"color: #888; font-size: {self._counter_font_size}px; "
+            f"color: #888; font-size: {self._counter_font_px}px; "
             "background: transparent;")
         counter_layout.addWidget(self._cooldown_label)
 
         # Clear button in counter bar
         self._counter_clear_btn = QPushButton("清空")
-        self._counter_clear_btn.setMinimumHeight(22)
+        self._counter_clear_btn.setMinimumHeight(self._scaled_px(20))
         self._counter_clear_btn.setToolTip("清空识别记录")
         self._counter_clear_btn.clicked.connect(self._do_clear)
         self._counter_clear_btn.setStyleSheet(
             "QPushButton { color: #888; background: transparent; border: none; "
-            "font-size: 12px; padding: 2px 6px; }"
+            f"font-size: {max(9, self._scaled_px(12))}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #fff; background: rgba(255,255,255,18); "
             "border-radius: 4px; }")
         counter_layout.addWidget(self._counter_clear_btn)
@@ -703,7 +716,7 @@ class ResultTextOverlay(QWidget):
 
         # ── size grip ──
         self._size_grip = QSizeGrip(self)
-        self._size_grip.setFixedSize(16, 16)
+        self._size_grip.setFixedSize(self._scaled_px(14), self._scaled_px(14))
         self._size_grip.setStyleSheet("QSizeGrip { background: transparent; }")
 
         # ── stylesheets ──
@@ -716,11 +729,11 @@ class ResultTextOverlay(QWidget):
 
     def _make_header_btn(self, text: str, tooltip: str):
         btn = QPushButton(text)
-        btn.setMinimumHeight(28)
+        btn.setMinimumHeight(self._scaled_px(24))
         btn.setToolTip(tooltip)
         btn.setStyleSheet(
             "QPushButton { color: #888; background: transparent; border: none; "
-            "font-size: 14px; padding: 2px 6px; }"
+            f"font-size: {self._button_font_px}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #fff; background: rgba(255,255,255,18); "
             "border-radius: 4px; }"
         )
@@ -844,7 +857,7 @@ class ResultTextOverlay(QWidget):
         self._debug_btn.setText("⬤ 存图" if self._status_debug_on else "○ 存图")
         self._debug_btn.setStyleSheet(
             f"QPushButton {{ color: {'#e04040' if self._status_debug_on else '#888'}; "
-            "background: transparent; border: none; font-size: 14px; padding: 2px 6px; }"
+            f"background: transparent; border: none; font-size: {self._button_font_px}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #fff; background: rgba(255,255,255,18); "
             "border-radius: 4px; }")
         self._signals.toggle_debug_save.emit(self._status_debug_on)
@@ -854,7 +867,7 @@ class ResultTextOverlay(QWidget):
         self._preview_btn.setText("🔍 预览" if self._status_preview_on else "◌ 预览")
         self._preview_btn.setStyleSheet(
             f"QPushButton {{ color: {'#66aaff' if self._status_preview_on else '#888'}; "
-            "background: transparent; border: none; font-size: 14px; padding: 2px 6px; }"
+            f"background: transparent; border: none; font-size: {self._button_font_px}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #fff; background: rgba(255,255,255,18); "
             "border-radius: 4px; }")
         self._signals.toggle_preview.emit(self._status_preview_on)
@@ -864,7 +877,7 @@ class ResultTextOverlay(QWidget):
         self._overlay_btn.setText("▣ 画框" if self._status_overlay_on else "□ 画框")
         self._overlay_btn.setStyleSheet(
             f"QPushButton {{ color: {'#ff8844' if self._status_overlay_on else '#888'}; "
-            "background: transparent; border: none; font-size: 14px; padding: 2px 6px; }"
+            f"background: transparent; border: none; font-size: {self._button_font_px}px; padding: 2px 6px; }}"
             "QPushButton:hover { color: #fff; background: rgba(255,255,255,18); "
             "border-radius: 4px; }")
         self._signals.toggle_debug_overlay.emit(self._status_overlay_on)
@@ -875,8 +888,8 @@ class ResultTextOverlay(QWidget):
         if total > 0:
             self._bl_counter.setText(
                 f"<html><body style='margin:0;padding:0'>"
-                f"<span style='color:#aaa;font-size:{self._counter_title_font_size}px;'>捕捉次数</span> "
-                f"<span style='color:#ffaa00;font-size:{self._counter_font_size}px;'>x {total}</span>"
+                f"<span style='color:#aaa;font-size:{self._counter_title_font_px}px;'>捕捉次数</span> "
+                f"<span style='color:#ffaa00;font-size:{self._counter_font_px}px;'>x {total}</span>"
                 f"</body></html>")
         else:
             self._bl_counter.setText("")
@@ -951,13 +964,13 @@ class ResultTextOverlay(QWidget):
         self._start_cooldown()
         self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_px}px; background: transparent;")
 
     def show_match(self, text: str = ""):
         self._start_cooldown()
         self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #44dd88; font-size: {self._status_font_size}px; background: transparent;")
+            f"color: #44dd88; font-size: {self._status_font_px}px; background: transparent;")
 
     def show_no_match(self):
         self._start_cooldown()
@@ -965,7 +978,7 @@ class ResultTextOverlay(QWidget):
         self._refresh_screenshot_counter()
         self._status_lbl.setText("📷 截图模式")
         self._status_lbl.setStyleSheet(
-            f"color: #44dd88; font-size: {self._status_font_size}px; "
+            f"color: #44dd88; font-size: {self._status_font_px}px; "
             "background: transparent;")
 
     def _start_cooldown(self):
@@ -1002,7 +1015,7 @@ class ResultTextOverlay(QWidget):
     # ── drag (on header bar only) ─────────────────────────────────────
 
     def _in_header(self, y: int) -> bool:
-        return y <= self._HEADER_H
+        return y <= self._header_h
 
     def _alt_held(self) -> bool:
         if self._mouse_locked:
@@ -1087,6 +1100,8 @@ class ResultTextOverlay(QWidget):
         self.config = config
         cfg = config.get("result_text_overlay", {})
         self._enabled = cfg.get("enabled", self._enabled)
+        self._ui_scale = float(cfg.get("ui_scale", self._ui_scale))
+        self._ui_scale = max(0.65, min(1.2, self._ui_scale))
         self._font_family = cfg.get("font_family", self._font_family)
         self._header_font_size = cfg.get("header_font_size", self._header_font_size)
         self._status_font_size = cfg.get("status_font_size", self._status_font_size)
@@ -1105,24 +1120,32 @@ class ResultTextOverlay(QWidget):
         self._padding = cfg.get("padding", self._padding)
         self._title_text = cfg.get("title", self._title_text)
         self._scrollbar_width = cfg.get("scrollbar_width", self._scrollbar_width)
-        self._min_w = cfg.get("min_width", self._min_w)
-        self._min_h = cfg.get("min_height", self._min_h)
-        w = cfg.get("width", self._width)
-        h = cfg.get("height", self._height)
+        self._min_w = max(180, self._scaled_px(cfg.get("min_width", self._min_w)))
+        self._min_h = max(110, self._scaled_px(cfg.get("min_height", self._min_h)))
+        self._header_h = self._scaled_px(self._BASE_HEADER_H)
+        self._header_font_px = max(10, self._scaled_px(self._header_font_size))
+        self._status_font_px = max(9, self._scaled_px(self._status_font_size))
+        self._counter_font_px = max(9, self._scaled_px(self._counter_font_size))
+        self._counter_title_font_px = max(8, self._scaled_px(self._counter_title_font_size))
+        self._padding_px = max(4, self._scaled_px(self._padding))
+        self._button_font_px = max(10, self._scaled_px(14))
+        w = max(self._min_w, int(cfg.get("width", self._width)))
+        h = max(self._min_h, int(cfg.get("height", self._height)))
         self._width, self._height = w, h
         self.resize(w, h)
         self.setMinimumSize(self._min_w, self._min_h)
+        self._header_bar.setFixedHeight(self._header_h)
         self._title_lbl.setText(self._title_text)
         self._title_lbl.setStyleSheet(
-            f"color: #ccc; font-size: {self._header_font_size}px; "
+            f"color: #ccc; font-size: {self._header_font_px}px; "
             "background: transparent; font-weight: bold;")
         self._status_lbl.setStyleSheet(
-            f"color: #aaa; font-size: {self._status_font_size}px; "
+            f"color: #aaa; font-size: {self._status_font_px}px; "
             "background: transparent;")
         self._bl_counter.setStyleSheet(
-            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_px}px; background: transparent;")
         self._attr_counter.setStyleSheet(
-            f"color: #aaa; font-size: {self._counter_font_size}px; background: transparent;")
+            f"color: #aaa; font-size: {self._counter_font_px}px; background: transparent;")
         self._panel.setStyleSheet(self._panel_style())
         self._scroll.setStyleSheet(self._scroll_style())
         self._header_bar.setStyleSheet(self._header_style())

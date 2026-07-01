@@ -350,6 +350,7 @@ class SubRoiTab(QWidget):
         sr["y_ratio"] = self.y_spin.value()
         sr["w_ratio"] = self.w_spin.value()
         sr["h_ratio"] = self.h_spin.value()
+        sr.pop("scale", None)
 
 
 class SubRoi2Tab(QWidget):
@@ -410,7 +411,8 @@ class SubRoi2Tab(QWidget):
 
     def _on_enabled_toggled(self, enabled):
         for w in [self.x_spin, self.y_spin, self.w_spin, self.h_spin,
-                   self.x_slider, self.y_slider, self.w_slider, self.h_slider]:
+                  self.x_slider, self.y_slider, self.w_slider, self.h_slider,
+                  ]:
             w.setEnabled(enabled)
 
     def _update_preview(self):
@@ -433,6 +435,7 @@ class SubRoi2Tab(QWidget):
         sr["y_ratio"] = self.y_spin.value()
         sr["w_ratio"] = self.w_spin.value()
         sr["h_ratio"] = self.h_spin.value()
+        sr.pop("scale", None)
 
 
 class PatternsTab(QWidget):
@@ -1242,7 +1245,8 @@ class IconDetectionTab(QWidget):
                   self.gamma_spin, self.delay_spin, self.debounce_spin,
                   self.offsets_edit,
                   self.icon_scale_min_spin, self.icon_scale_max_spin,
-                  self.icon_scale_steps_spin, self.tmpl_list]:
+                self.icon_scale_steps_spin,
+                  self.tmpl_list]:
             w.setEnabled(enabled)
 
     def _add_template(self):
@@ -1282,6 +1286,7 @@ class IconDetectionTab(QWidget):
         old = self.config.get("icon_detection", {})
         if "icon_roi" in old:
             ic["icon_roi"] = old["icon_roi"]
+            ic["icon_roi"].pop("scale", None)
 
 
 # ── Main Settings Window ─────────────────────────────────────────────

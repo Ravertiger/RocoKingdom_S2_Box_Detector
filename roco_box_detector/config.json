@@ -59,6 +59,8 @@
     "enabled": false,
     "show_preview_window": false,
     "save_debug_frames": false,
+    "preview_fps": 8,
+    "preview_capture_fps": 8,
     "save_every_n_seconds": 3,
     "debug_output_dir": "debug_output",
     "draw_anchor_box": true,
@@ -108,9 +110,7 @@
   },
   "icon_detection": {
     "enabled": true,
-    "templates": [
-      "templates/icon/92e16bca-924f-45e0-a0f3-c4ff61910d84.png"
-    ],
+    "templates": ["templates/icon/92e16bca-924f-45e0-a0f3-c4ff61910d84.png"],
     "threshold": 0.5,
     "use_grayscale": true,
     "preprocess_mode": "gamma",
@@ -120,12 +120,7 @@
     "scale_steps": 5,
     "disappear_delay_seconds": 0.5,
     "debounce_frames": 3,
-    "capture_offsets": [
-      0.95,
-      1.0,
-      1.05,
-      1.1
-    ],
+    "capture_offsets": [0.95, 1.0, 1.05, 1.1],
     "icon_roi": {
       "left": 2235,
       "top": 54,

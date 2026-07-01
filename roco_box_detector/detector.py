@@ -218,14 +218,17 @@ class CascadeDetector(threading.Thread):
         self._latest_sub_roi1: Optional[np.ndarray] = None
         self._latest_sub_roi2: Optional[np.ndarray] = None
         self._preview_window_open = False
-        self._preview_fps_limit = 15
+        self._preview_fps_limit = 8
+        self._preview_capture_fps_limit = 8
         self._last_preview_time = 0.0
+        self._last_preview_capture_time = 0.0
 
         # Per-frame debug state
         self._dbg_roi: Optional[np.ndarray] = None
         self._dbg_anchor_box: Optional[Tuple[int, int, int, int]] = None
         self._dbg_sub_roi_box: Optional[Tuple[int, int, int, int]] = None
         self._dbg_sub_roi_box_2: Optional[Tuple[int, int, int, int]] = None
+        self._dbg_icon_roi_box: Optional[Tuple[int, int, int, int]] = None
         self._dbg_anchor_score: float = 0.0
         self._dbg_status_text: str = ""
         self._last_cycle_ms: float = 0.0
@@ -293,6 +296,9 @@ class CascadeDetector(threading.Thread):
 
         dbg = config.get("debug", {})
         self._show_preview = bool(dbg.get("show_preview_window", False))
+        self._preview_fps_limit = max(1, int(dbg.get("preview_fps", 8)))
+        self._preview_capture_fps_limit = max(
+            1, int(dbg.get("preview_capture_fps", self._preview_fps_limit)))
 
         self._cooldown_seconds = float(rt.get("sequence_cooldown_seconds", 1.5))
 
@@ -625,13 +631,17 @@ class CascadeDetector(threading.Thread):
 
     def _refresh_preview_roi(self) -> None:
         """Periodically capture game ROI for debug preview.
-        Always captures on first call (when _dbg_roi is None),
-        then throttles to every 15 frames."""
-        if self._dbg_roi is not None and self._frame_idx % 15 != 0:
+        Always captures on first call (when _dbg_roi is None), then uses
+        time-based throttling so refresh rate is stable even when loop speed changes.
+        """
+        now = time.time()
+        if (self._dbg_roi is not None and
+                now - self._last_preview_capture_time < (1.0 / self._preview_capture_fps_limit)):
             return
         capture = self._capture_roi()
         if capture is not None:
             self._dbg_roi = capture.copy()
+            self._last_preview_capture_time = now
 
     # ── scheduled capture (icon mode gate open) ──────────────────────
 
@@ -938,8 +948,6 @@ class CascadeDetector(threading.Thread):
                 except Exception:
                     pass
             return
-        if self._sampling_state == "sampling" and self._locked_anchor_box is not None:
-            return
         # Icon mode: allow preview with just icon thumbnail; normal mode: need ROI
         if self._dbg_roi is None and not self._icon_detection_enabled:
             return
@@ -951,11 +959,13 @@ class CascadeDetector(threading.Thread):
         self._last_preview_time = now
 
         if self._dbg_roi is not None:
+            self._dbg_icon_roi_box = self._compute_icon_roi_box_in_main_roi()
             debug = self.debug_drawer.draw_boxes(
                 self._dbg_roi,
                 anchor_box=self._dbg_anchor_box,
                 sub_roi_box=self._dbg_sub_roi_box,
                 sub_roi_box_2=self._dbg_sub_roi_box_2,
+                icon_roi_box=self._dbg_icon_roi_box,
                 anchor_score=self._dbg_anchor_score,
             )
             debug = np.ascontiguousarray(debug)
@@ -1169,7 +1179,25 @@ class CascadeDetector(threading.Thread):
         else:
             self._locked_sub_roi_2 = None
 
+        self._dbg_sub_roi_box = self._locked_sub_roi
+        self._dbg_sub_roi_box_2 = self._locked_sub_roi_2
+
         print(f"[Capture] Start: delay={self._seq_sample_delay}s "
               f"interval={self._seq_sample_interval}s "
               f"max_frames={self._seq_max_frames} "
               f"roi2={'on' if self._locked_sub_roi_2 else 'off'}")
+
+    def _compute_icon_roi_box_in_main_roi(self) -> Optional[Tuple[int, int, int, int]]:
+        """Map absolute icon ROI to main ROI-local coordinates for preview overlay."""
+        if self.roi is None or self._icon_roi is None:
+            return None
+        x = self._icon_roi["left"] - self.roi["left"]
+        y = self._icon_roi["top"] - self.roi["top"]
+        w = self._icon_roi["width"]
+        h = self._icon_roi["height"]
+        if w <= 0 or h <= 0:
+            return None
+        # Keep partially visible intersection so users can diagnose offset quickly.
+        if x + w < 0 or y + h < 0:
+            return None
+        return (int(x), int(y), int(w), int(h))

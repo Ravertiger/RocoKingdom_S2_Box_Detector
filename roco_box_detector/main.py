@@ -1,5 +1,53 @@
 """Roco Box Detector — main entry point."""
 
+# ── Windows DPI awareness ───────────────────────────────────────────
+# Must be set BEFORE any GUI framework creates windows, otherwise
+# coordinates from tkinter/Win32 APIs and mss screenshots will mismatch
+# under display scaling (e.g. 150%). This makes all APIs use physical pixels.
+import ctypes
+
+PROCESS_PER_MONITOR_DPI_AWARE = 2
+PROCESS_SYSTEM_DPI_AWARE = 1
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+
+
+def _init_windows_dpi_awareness() -> None:
+    """Set process DPI awareness early so all coordinate systems use physical pixels."""
+    try:
+        user32 = ctypes.windll.user32
+        if hasattr(user32, "SetProcessDpiAwarenessContext"):
+            ok = user32.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            )
+            if ok:
+                print("[DPI] SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)")
+                return
+    except Exception:
+        pass
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)
+        print("[DPI] SetProcessDpiAwareness(PER_MONITOR_DPI_AWARE)")
+        return
+    except Exception:
+        pass
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_SYSTEM_DPI_AWARE)
+        print("[DPI] SetProcessDpiAwareness(SYSTEM_DPI_AWARE)")
+        return
+    except Exception:
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+        print("[DPI] SetProcessDPIAware()")
+    except Exception:
+        print("[DPI] WARNING: Failed to set DPI awareness — scaling may be broken")
+
+
+_init_windows_dpi_awareness()
+
 import json
 import os
 import sys
@@ -42,6 +90,19 @@ class App:
     def __init__(self):
         self.config = self._load_config()
         self._ensure_dirs()
+
+        # Qt high-DPI attributes — must be set before QApplication
+        # Note: AA_EnableHighDpiScalingAttributes was removed in PyQt5 5.14+
+        # (high-DPI scaling is already enabled by default since Qt 5.6)
+        from PyQt5.QtCore import Qt
+        try:
+            QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        except AttributeError:
+            pass  # already default in newer PyQt5
+        try:
+            QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        except AttributeError:
+            pass
 
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)

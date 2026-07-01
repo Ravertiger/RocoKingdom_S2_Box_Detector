@@ -22,7 +22,7 @@ def compute_sub_roi(
 
     anchor_box: (x, y, w, h) relative to the ROI
     image_shape: (height, width) of the ROI image
-    sub_roi_config: ratio values for computing sub-region
+    sub_roi_config: ratio values for computing sub-region.
 
     Returns (x, y, w, h) clamped to image bounds.
     """
